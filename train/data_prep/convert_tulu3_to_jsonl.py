@@ -1,14 +1,29 @@
-"""Convert allenai/tulu-3-sft-mixture conversations into RWKV-v7 G1x JSONL format.
+"""Convert allenai/tulu-3-sft-mixture conversations into RWKV-v7 G1x JSONL format,
+emitting **role-aware segments** so downstream tools can build a per-token lossable
+mask (see preprocess_segments.py).
 
-Output format (one JSONL line per conversation):
-    {"text": "User: ...\\n\\nAssistant: <think>\\n</think>\\n\\n...\\n\\nUser: ..."}
+Each output JSONL line is one conversation:
 
-Template rules (see RWKV-v7/RWKV7-G1x-templates.txt):
-- Turns are joined by "\\n\\n".
-- Each turn is "<Role>: <content>" where Role is one of System / User / Assistant.
-- Every Assistant turn gets a fake-think prefix "Assistant: <think>\\n</think>\\n\\n<content>"
-  (tulu-3 has no explicit think blocks; the fake-think variant is fast and gives nice results).
-- Each turn's content is run through clean_txt (collapse blank lines, normalize CRLF, strip).
+    {"segments": [
+        {"text": "User: hi",                              "lossable": false},
+        {"text": "\\n\\n",                                "lossable": false},
+        {"text": "Assistant: <think></think>\\n",          "lossable": false},
+        {"text": "the assistant's actual reply",          "lossable": true},
+        {"text": "\\n\\n",                                "lossable": false},
+        ...
+    ]}
+
+Concatenating ``segment["text"]`` in order yields exactly the same string as the
+old ``"text"``-only format (so the surface tokenization is unchanged), plus a
+parallel lossable bit per segment.
+
+Loss-mask conventions:
+- System / User / role prefix / inter-turn separators -> lossable = false.
+- "Assistant: <think></think>\\n" prefix is treated like a structural marker (not
+  lossable) per the user's spec; the assistant's actual reply is the only lossable
+  span per turn.
+- tulu-3 conversations have no explicit think block -> we always use the empty
+  fake-think prefix (matches RWKV7-G1x "fake thinking" template).
 """
 import argparse
 import json
@@ -18,6 +33,8 @@ from datasets import load_dataset
 
 
 _BLANK_LINES_RE = re.compile(r"\n{2,}")
+_TURN_SEP = "\n\n"
+_ASSISTANT_PREFIX = "Assistant: <think></think>\n"
 
 
 def clean_txt(txt: str) -> str:
@@ -25,24 +42,29 @@ def clean_txt(txt: str) -> str:
     return _BLANK_LINES_RE.sub("\n", txt.replace("\r\n", "\n")).strip()
 
 
-def format_conversation(messages):
-    """Apply RWKV-v7 G1x template to a tulu-3 messages list.
+def conversation_to_segments(messages):
+    """Apply RWKV-v7 G1x template + role-aware lossable mask.
 
     tulu-3 schema: [{"role": "system" | "user" | "assistant", "content": "..."}, ...]
+    Returns: list of {"text": str, "lossable": bool} segments.
     """
-    parts = []
-    for m in messages:
+    segments = []
+    for i, m in enumerate(messages):
+        if i > 0:
+            segments.append({"text": _TURN_SEP, "lossable": False})
         role = m["role"]
         content = clean_txt(m["content"])
         if role == "system":
-            parts.append(f"System: {content}")
+            segments.append({"text": f"System: {content}", "lossable": False})
         elif role == "user":
-            parts.append(f"User: {content}")
+            segments.append({"text": f"User: {content}", "lossable": False})
         elif role == "assistant":
-            parts.append(f"Assistant: <think></think>\n{content}")
+            # Structural prefix is not part of the assistant's "answer" -> not lossable.
+            segments.append({"text": _ASSISTANT_PREFIX, "lossable": False})
+            segments.append({"text": content, "lossable": True})
         else:
             raise ValueError(f"unknown role: {role!r}")
-    return "\n\n".join(parts)
+    return segments
 
 
 def main():
@@ -62,9 +84,8 @@ def main():
         for i, row in enumerate(ds):
             if args.limit is not None and n_written >= args.limit:
                 break
-            messages = row[args.messages_field]
-            text = format_conversation(messages)
-            f.write(json.dumps({"text": text}, ensure_ascii=False))
+            segments = conversation_to_segments(row[args.messages_field])
+            f.write(json.dumps({"segments": segments}, ensure_ascii=False))
             f.write("\n")
             n_written += 1
 

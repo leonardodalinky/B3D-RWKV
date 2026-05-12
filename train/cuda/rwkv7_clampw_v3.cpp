@@ -23,7 +23,7 @@ void backward(torch::Tensor &r, torch::Tensor &w, torch::Tensor &k, torch::Tenso
             (float*)s.data_ptr(), (float*)sa.data_ptr(), (bf*)dr.data_ptr(), (bf*)dw.data_ptr(), (bf*)dk.data_ptr(), (bf*)dv.data_ptr(), (bf*)da.data_ptr(), (bf*)db.data_ptr());
 }
 
-TORCH_LIBRARY(rwkv7_clampw_v3, m) {
+TORCH_LIBRARY(rwkv7_clampw, m) {
     m.def("forward", forward);
     m.def("backward", backward);
 }

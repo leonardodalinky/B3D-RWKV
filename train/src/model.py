@@ -49,7 +49,8 @@ if 'x070' in os.environ["RWKV_MY_TESTING"]:
     # use rwkv7_clampw_v3.cpp and rwkv7_clampw_v3_for_h100.cu for 20% faster fwd & bwd kernel on H100s
 
     flags = ['-res-usage', f'-D_N_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
-    load(name="rwkv7_clampw", sources=[f'cuda/rwkv7_clampw.cu', 'cuda/rwkv7_clampw.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+    load(name="rwkv7_clampw", sources=[f'cuda/rwkv7_clampw_v3_for_h100.cu', 'cuda/rwkv7_clampw_v3.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+    # load(name="rwkv7_clampw", sources=[f'cuda/rwkv7_clampw.cu', 'cuda/rwkv7_clampw.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
     class RWKV7_CLAMPW_CUDA_OP(torch.autograd.Function):
         @staticmethod
         def forward(ctx,r,w,k,v,a,b):
@@ -75,6 +76,21 @@ if 'x070' in os.environ["RWKV_MY_TESTING"]:
         B,T,HN = r.shape
         r,w,k,v,a,b = [i.view(B,T,HN//64,64) for i in [r,w,k,v,a,b]] # can change 64 to your HEAD_SIZE. have to hard-code the number here, or pytorch will complain
         return RWKV7_CLAMPW_CUDA_OP.apply(r,w,k,v,a,b).view(B,T,HN)
+
+    # Stateful (RNN-mode) WKV kernel from upstream rwkv_v7_demo_fast.py — used by
+    # RWKV.forward_fast for state-aware inference (no autograd, eval only).
+    load(name="wkv7s", sources=["cuda/wkv7s_op.cpp", "cuda/wkv7s.cu"], is_python_module=False,
+         verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"])
+
+    def RWKV7S_OP(state, r, w, k, v, a, b):
+        """Stateful WKV-7 op. Inputs are (T, C); state is (H, N, N) fp32, mutated in place.
+        Returns y of shape (T, C). Caller's responsibility: bf16 / fp16 inputs, contiguous.
+        """
+        T, C = r.shape
+        H = C // HEAD_SIZE
+        y = torch.empty((T, C), device=r.device, dtype=r.dtype, requires_grad=False, memory_format=torch.contiguous_format)
+        torch.ops.wkv7s.forward(1, T, C, H, state, r, w, k, v, a, b, y)
+        return y
 
 ########################################################################################################
 
@@ -165,8 +181,10 @@ if os.environ.get("RWKV_JIT_ON") == "1":
     def tmix_mix6_bf16_v5(x, x_r, x_w, x_k, x_v, x_a, x_g):
         return _tmix_mix6_bf16_v5_jit(x, x_r, x_w, x_k, x_v, x_a, x_g)
 else:
-    def tmix_mix6_bf16_v5(x, x_r, x_w, x_k, x_v, x_a, x_g):
-        return tuple(_forward_op(x, x_r, x_w, x_k, x_v, x_a, x_g))
+    # _forward_op gets re-defined 4 more times below; capture the current
+    # binding via default arg to defeat Python late binding.
+    def tmix_mix6_bf16_v5(x, x_r, x_w, x_k, x_v, x_a, x_g, _op=_forward_op):
+        return tuple(_op(x, x_r, x_w, x_k, x_v, x_a, x_g))
 
 ########################################################################################################
 
@@ -235,8 +253,8 @@ if os.environ.get("RWKV_JIT_ON") == "1":
     def tmix_kk_pre_bf16_v5(k, k_k, a, k_a):
         return _tmix_kk_pre_bf16_v5_jit(k, k_k, a, k_a)
 else:
-    def tmix_kk_pre_bf16_v5(k, k_k, a, k_a):
-        return tuple(_forward_op(k, k_k, a, k_a))
+    def tmix_kk_pre_bf16_v5(k, k_k, a, k_a, _op=_forward_op):
+        return tuple(_op(k, k_k, a, k_a))
 
 ########################################################################################################
 
@@ -313,8 +331,8 @@ if os.environ.get("RWKV_JIT_ON") == "1":
     def tmix_lnx_rkvres_xg_bf16_v1(x, r, k, v, r_k, weight, bias, g):
         return _tmix_lnx_rkvres_xg_bf16_v1_jit(x, r, k, v, r_k, weight, bias, g)
 else:
-    def tmix_lnx_rkvres_xg_bf16_v1(x, r, k, v, r_k, weight, bias, g):
-        return _forward_op(x, r, k, v, r_k, weight, bias, g)
+    def tmix_lnx_rkvres_xg_bf16_v1(x, r, k, v, r_k, weight, bias, g, _op=_forward_op):
+        return _op(x, r, k, v, r_k, weight, bias, g)
 
 ########################################################################################################
 
@@ -361,8 +379,8 @@ if os.environ.get("RWKV_JIT_ON") == "1":
     def tmix_a_gate_bf16(a0, a12):
         return _tmix_a_gate_bf16_jit(a0, a12)
 else:
-    def tmix_a_gate_bf16(a0, a12):
-        return _forward_op(a0, a12)
+    def tmix_a_gate_bf16(a0, a12, _op=_forward_op):
+        return _op(a0, a12)
 
 ########################################################################################################
 
@@ -419,8 +437,8 @@ if os.environ.get("RWKV_JIT_ON") == "1":
     def tmix_vres_gate_bf16_v1(v, v_first, v0, v12):
         return _tmix_vres_gate_bf16_v1_jit(v, v_first, v0, v12)
 else:
-    def tmix_vres_gate_bf16_v1(v, v_first, v0, v12):
-        return _forward_op(v, v_first, v0, v12)
+    def tmix_vres_gate_bf16_v1(v, v_first, v0, v12, _op=_forward_op):
+        return _op(v, v_first, v0, v12)
 
 ########################################################################################################
 
@@ -452,6 +470,64 @@ class L2WrapCrossEntropyCUDA(torch.autograd.Function):
 
 def l2wrap_cross_entropy(logits, targets):
     return L2WrapCrossEntropyCUDA.apply(logits, targets)
+
+
+def _diffusion_confidence_loss(logits, targets):
+    """LLaDA-2.0 Confidence-Aware Parallel Training (CAP) auxiliary loss.
+
+    Minimizes the entropy of the predicted distribution H(p_theta(. | x_t, c))
+    ONLY at positions that (a) carry CE supervision (targets != -100, i.e. a
+    masked b2 ∩ lossable position) AND (b) are *already correctly* predicted
+    by the current model (argmax(logits) == target). Sharpens the model's
+    confidence on already-correct tokens so parallel decoders can commit more
+    of them per step. Selective gating prevents the entropy term from fighting
+    CE on still-wrong tokens.
+
+    Memory note: we INDEX-SELECT the (correct & valid) subset BEFORE running
+    log_softmax. Otherwise we'd materialize three (B*T, V) fp32 tensors which
+    OOMs at training shapes (B=16, T=6144, V=65536 -> ~25 GB each). After
+    selection the dimension shrinks to ~hundreds-to-thousands of rows.
+
+    Args:
+        logits:  (B, T, V) raw scores
+        targets: (B, T)    int64; -100 marks "skip"
+
+    Returns:
+        scalar mean entropy over the (correct & valid) positions, or 0 when
+        no such positions exist in the batch.
+    """
+    flat_logits = logits.reshape(-1, logits.size(-1))   # (N, V)
+    flat_targets = targets.reshape(-1)                  # (N,)
+
+    # All gating decisions are no_grad: argmax + boolean ops produce no gradient.
+    with torch.no_grad():
+        valid = flat_targets != -100
+        if not valid.any():
+            return logits.new_zeros(())
+        argmax = flat_logits.argmax(dim=-1)
+        correct_mask = (argmax == flat_targets) & valid
+        if not correct_mask.any():
+            return logits.new_zeros(())
+
+    # Subset first: now we only materialize (M, V), M = #correct (typically
+    # << B*T). Gradient still flows through the selected rows.
+    sub_logits = flat_logits[correct_mask]              # (M, V)
+
+    # Compute entropy via the logsumexp identity to avoid the 0*(-inf)=NaN
+    # trap. The naive form `-(softmax(z) * log_softmax(z)).sum()` blows up
+    # whenever some logit is so much smaller than max that softmax(z_i) = 0
+    # exactly while log_softmax(z_i) = -inf. With bf16 + a 65k-vocab head and
+    # peaky predictions, this is common, not rare.
+    #   H(p) = -sum_i p_i * log p_i
+    #        = -sum_i p_i * (z_i - lse)            [since log p_i = z_i - lse]
+    #        =  lse - sum_i p_i * z_i              [since sum p_i = 1]
+    # `z_i` is a finite logit (never -inf), so the multiplication is well-defined.
+    # Cast to fp32 for stable softmax / logsumexp (bf16 sums can drift).
+    sub_logits_f = sub_logits.float()
+    lse = torch.logsumexp(sub_logits_f, dim=-1)        # (M,)
+    probs = F.softmax(sub_logits_f, dim=-1)            # (M, V)
+    entropy = lse - (probs * sub_logits_f).sum(dim=-1) # (M,)
+    return entropy.mean()
 
 ########################################################################################################
 
@@ -540,23 +616,27 @@ class RWKV_Tmix_x070(MyModule):
                 zigzag[n] = zigzag[n] * abs(zigzag[n])
                 www[n] = -6 + 6 * (n / (C - 1)) ** (1 + 1 * ratio_0_to_1 ** 0.3)
 
-            D_DECAY_LORA = max(32, int(round(  (2.5*(C**0.5))  /32)*32)) # suggestion
+            # The four LoRA-style ranks below are chosen by an "n_embd-scaled" heuristic
+            # by default, but BlinkDL's released ckpts (e.g. RWKV7-G1f-7.2B) use
+            # hand-picked values that don't match those formulas. Allow args overrides
+            # so you can load any official ckpt by passing the right CLI flags.
+            D_DECAY_LORA = getattr(args, "d_decay_lora", 0) or max(32, int(round((2.5*(C**0.5))/32)*32))
             self.w1 = nn.Parameter(torch.zeros(C, D_DECAY_LORA))
             self.w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, C), 0.1))
             self.w0 = nn.Parameter(www.reshape(1,1,C) + 0.5 + zigzag*2.5)
 
-            D_AAA_LORA = max(32, int(round(  (2.5*(C**0.5))  /32)*32)) # suggestion
+            D_AAA_LORA = getattr(args, "d_aaa_lora", 0) or max(32, int(round((2.5*(C**0.5))/32)*32))
             self.a1 = nn.Parameter(torch.zeros(C, D_AAA_LORA))
             self.a2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, C), 0.1))
             self.a0 = nn.Parameter(torch.zeros(1,1,C)-0.19 + zigzag*0.3 + linear*0.4)
 
-            D_MV_LORA = max(32, int(round(  (1.7*(C**0.5))  /32)*32)) # suggestion
+            D_MV_LORA = getattr(args, "d_mv_lora", 0) or max(32, int(round((1.7*(C**0.5))/32)*32))
             self.v1 = nn.Parameter(torch.zeros(C, D_MV_LORA))
             self.v2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, C), 0.1))
             self.v0 = nn.Parameter(torch.zeros(1,1,C)+0.73 - linear*0.4)
 
             # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
-            D_GATE_LORA = max(32, int(round(  (5*(C**0.5))  /32)*32)) # suggestion
+            D_GATE_LORA = getattr(args, "d_gate_lora", 0) or max(32, int(round((5*(C**0.5))/32)*32))
             self.g1 = nn.Parameter(torch.zeros(C, D_GATE_LORA))
             self.g2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, C), 0.1))
 
@@ -767,6 +847,114 @@ class Block(nn.Module):
 #         return (grad_output, grad_output * gy) # original (grad_output, gy) is buggy when grad_output != 1 !!!
 
 
+########################################################################################################
+# State-mode (RNN) helpers used by RWKV.forward_fast.
+# Direct port of the demo_fast.py TMix/CMix one+seq routines, but reading weights
+# from our existing nn.Module attributes (no flat-dict transposes).
+########################################################################################################
+
+@torch.no_grad()
+def _tmix_one(att, layer_id, x, x_prev, kv_state, v_first):
+    """Single-token TMix in state mode. Shapes: x (C,), x_prev (C,), kv_state (H,N,N) fp32."""
+    H = att.n_head
+    N = att.head_size
+    xx = x_prev - x
+    xr = x + xx * att.x_r.view(-1)
+    xw = x + xx * att.x_w.view(-1)
+    xk = x + xx * att.x_k.view(-1)
+    xv = x + xx * att.x_v.view(-1)
+    xa = x + xx * att.x_a.view(-1)
+    xg = x + xx * att.x_g.view(-1)
+
+    r = att.receptance(xr)
+    w_lora = torch.tanh(xw @ att.w1) @ att.w2          # (C,)
+    k = att.key(xk)
+    v = att.value(xv)
+    a = torch.sigmoid(att.a0.view(-1) + (xa @ att.a1) @ att.a2)
+    g = torch.sigmoid(xg @ att.g1) @ att.g2
+
+    kk = F.normalize((k * att.k_k.view(-1)).view(H, N), dim=-1, p=2.0).view(H * N)
+    k = k * (1 + (a - 1) * att.k_a.view(-1))
+    if layer_id == 0:
+        v_first = v
+    else:
+        v = v + (v_first - v) * torch.sigmoid(att.v0.view(-1) + (xv @ att.v1) @ att.v2)
+
+    # Single-token decay form (from demo_fast forward_one)
+    w = torch.exp(-0.606531 * torch.sigmoid((att.w0.view(-1) + w_lora).float()))  # 0.606531 = exp(-0.5)
+
+    vk = v.view(H, N, 1) @ k.view(H, 1, N)
+    ab = (-kk).view(H, N, 1) @ (kk * a).view(H, 1, N)
+    kv_state = kv_state * w.view(H, 1, N) + kv_state @ ab.float() + vk.float()
+    out = (kv_state.to(dtype=x.dtype) @ r.view(H, N, 1)).view(H * N)
+
+    out = F.group_norm(out.view(1, H * N), num_groups=H, weight=att.ln_x.weight, bias=att.ln_x.bias, eps=64e-5).view(H * N)
+    out = out + ((r * k * att.r_k.view(-1)).view(H, N).sum(dim=-1, keepdim=True) * v.view(H, N)).view(H * N)
+    return att.output(out * g), x, kv_state, v_first
+
+
+@torch.no_grad()
+def _tmix_seq(att, layer_id, x, x_prev, kv_state, v_first):
+    """Multi-token TMix in state mode. Shapes: x (T,C), x_prev (C,), kv_state (H,N,N) fp32."""
+    T = x.shape[0]
+    H = att.n_head
+    N = att.head_size
+    # time-shift: prepend x_prev, drop last
+    shifted = torch.cat((x_prev.unsqueeze(0), x[:-1, :]), dim=0)
+    xx = shifted - x
+    xr = x + xx * att.x_r.view(-1)
+    xw = x + xx * att.x_w.view(-1)
+    xk = x + xx * att.x_k.view(-1)
+    xv = x + xx * att.x_v.view(-1)
+    xa = x + xx * att.x_a.view(-1)
+    xg = x + xx * att.x_g.view(-1)
+
+    r = att.receptance(xr)
+    w_lora = torch.tanh(xw @ att.w1) @ att.w2          # (T, C)
+    k = att.key(xk)
+    v = att.value(xv)
+    a = torch.sigmoid(att.a0.view(-1) + (xa @ att.a1) @ att.a2)
+    g = torch.sigmoid(xg @ att.g1) @ att.g2
+
+    kk = F.normalize((k * att.k_k.view(-1)).view(T, H, N), dim=-1, p=2.0).view(T, H * N)
+    k = k * (1 + (a - 1) * att.k_a.view(-1))
+    if layer_id == 0:
+        v_first = v
+    else:
+        v = v + (v_first - v) * torch.sigmoid(att.v0.view(-1) + (xv @ att.v1) @ att.v2)
+
+    # Multi-token decay form (from demo_fast forward_seq) — log-domain for the wkv7s kernel.
+    w_for_kernel = -F.softplus(-(att.w0.view(-1) + w_lora)) - 0.5
+    out = RWKV7S_OP(kv_state, r.contiguous(), w_for_kernel.contiguous(),
+                    k.contiguous(), v.contiguous(), (-kk).contiguous(), (kk * a).contiguous())
+
+    out = F.group_norm(out.view(T, H * N), num_groups=H, weight=att.ln_x.weight, bias=att.ln_x.bias, eps=64e-5).view(T, H * N)
+    out = out + ((r * k * att.r_k.view(-1)).view(T, H, N).sum(dim=-1, keepdim=True) * v.view(T, H, N)).view(T, H * N)
+    return att.output(out * g), x[-1, :], kv_state, v_first
+
+
+@torch.no_grad()
+def _cmix_one(ffn, x, x_prev):
+    """Single-token CMix in state mode. x (C,), x_prev (C,)."""
+    xx = x_prev - x
+    k = x + xx * ffn.x_k.view(-1)
+    k = torch.relu(ffn.key(k)) ** 2
+    return ffn.value(k), x
+
+
+@torch.no_grad()
+def _cmix_seq(ffn, x, x_prev):
+    """Multi-token CMix in state mode. x (T,C), x_prev (C,)."""
+    shifted = torch.cat((x_prev.unsqueeze(0), x[:-1, :]), dim=0)
+    xx = shifted - x
+    k = x + xx * ffn.x_k.view(-1)
+    k = torch.relu(ffn.key(k)) ** 2
+    return ffn.value(k), x[-1, :]
+
+
+########################################################################################################
+
+
 class RWKV(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
@@ -816,6 +1004,56 @@ class RWKV(pl.LightningModule):
             {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0, "my_lr_scale": 2.0},
         ]
 
+        # Optimizer choice via --optim:
+        #   "adam"      (default): FusedAdam / DeepSpeedCPUAdam — 12 bytes/param Adam state.
+        #   "8bit"      : bitsandbytes AdamW8bit — ~3 bytes/param, but unstable for some
+        #                  setups (RWKV-7 SFT here has flown out). Skipped if offload is on.
+        #   "adafactor" : HF Adafactor — 8 bytes/param (no fp32 v; uses row/col factorization).
+        #                  Stays on GPU. Most memory-efficient stable choice for this model.
+        # Back-compat: --optim_8bit 1 still selects "8bit".
+        optim_choice = str(getattr(args, "optim", "adam") or "adam").lower()
+        if bool(getattr(args, "optim_8bit", 0)):
+            optim_choice = "8bit"
+
+        if optim_choice == "adafactor":
+            # ~33% memory savings vs Adam by storing variance as row+col factors instead
+            # of full per-param fp32. No CPU offload needed; sit on GPU. Prefer the HF
+            # implementation because its `relative_step=False, scale_parameter=False`
+            # mode behaves like a drop-in Adam (just lighter).
+            try:
+                from transformers.optimization import Adafactor
+            except Exception as e:
+                raise RuntimeError("optim=adafactor needs `transformers` installed") from e
+            if self.deepspeed_offload:
+                rank_zero_info("########## --optim adafactor set but DeepSpeed offload is on; offload will be ignored (Adafactor stays on GPU) ##########")
+            if args.weight_decay > 0:
+                optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": args.weight_decay, "my_lr_scale": 1.0}]
+            return Adafactor(
+                optim_groups,
+                lr=self.args.lr_init,
+                eps=(1e-30, self.args.adam_eps),  # (eps_grad², eps_param)
+                clip_threshold=1.0,
+                beta1=self.args.beta1,           # use β1 for momentum (otherwise pure RMSProp-like)
+                weight_decay=0.0,                # already in optim_groups
+                scale_parameter=False,           # Adam-style LR semantics
+                relative_step=False,             # use our cosine schedule, not Adafactor's
+                warmup_init=False,
+            )
+
+        if optim_choice == "8bit":
+            # bitsandbytes 8-bit AdamW: m/v stored as int8 with per-block scales
+            # (~4x smaller than fp32). Stays on GPU; replaces FusedAdam.
+            # When deepspeed_offload is also on, prefer the CPU path instead since
+            # bnb's GPU optimizer can't be efficiently offloaded.
+            if self.deepspeed_offload:
+                rank_zero_info("########## --optim 8bit set but DeepSpeed offload is on; falling back to DeepSpeedCPUAdam ##########")
+            else:
+                import bitsandbytes as bnb
+                if args.weight_decay > 0:
+                    optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": args.weight_decay, "my_lr_scale": 1.0}]
+                    return bnb.optim.AdamW8bit(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps)
+                return bnb.optim.Adam8bit(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps)
+
         if args.weight_decay > 0:
             optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": args.weight_decay, "my_lr_scale": 1.0}]
             if self.deepspeed_offload:
@@ -851,6 +1089,89 @@ class RWKV(pl.LightningModule):
         x = self.ln_out(x)
         return x
 
+    # ------------------------------------------------------------------
+    # State-mode (RNN-style) inference path. Mirrors RWKV-v7 demo_fast.py.
+    # No autograd, eval only. Use this for fast sampling / diffusion denoising
+    # where the same prefix state is reused across many forwards.
+    # ------------------------------------------------------------------
+
+    def init_state(self, device=None, dtype=None):
+        """Build a fresh zero state for forward_fast. Returns a list of length n_layer*3."""
+        args = self.args
+        if device is None:
+            device = self.emb.weight.device
+        if dtype is None:
+            dtype = self.emb.weight.dtype
+        H = args.dim_att // args.head_size
+        N = args.head_size
+        state = []
+        for _ in range(args.n_layer):
+            state.append(torch.zeros(args.n_embd, dtype=dtype, device=device))            # att_x_prev
+            state.append(torch.zeros((H, N, N), dtype=torch.float32, device=device))      # att_kv (fp32)
+            state.append(torch.zeros(args.n_embd, dtype=dtype, device=device))            # ffn_x_prev
+        return state
+
+    @torch.no_grad()
+    def forward_fast(self, idx, state=None, full_output=False):
+        """State-mode forward (RNN-style). Equivalent in math to ``forward(idx)`` but
+        carries an explicit RNN state, so consecutive calls don't redo earlier work.
+
+        Args:
+            idx: ``int`` (single token), or 1-D ``LongTensor`` on cuda (a sequence).
+            state: list of ``n_layer * 3`` tensors, or ``None`` to start from zero.
+                The list is mutated in place; the same list is returned.
+            full_output: if False (default) and idx is a sequence, return logits for
+                the last position only. If True, return logits for every position.
+
+        Returns: ``(logits, state)``. ``logits`` shape:
+            - single-token idx: ``(vocab,)``
+            - sequence idx, full_output=False: ``(vocab,)`` (last position)
+            - sequence idx, full_output=True:  ``(T, vocab)``
+        """
+        if state is None:
+            state = self.init_state()
+
+        if isinstance(idx, int):
+            x = self.emb.weight[idx]   # (C,)
+            is_seq = False
+        else:
+            assert idx.dim() == 1, "forward_fast expects a 1-D token tensor or an int"
+            if idx.shape[0] == 1:
+                x = self.emb(idx).squeeze(0)
+                is_seq = False
+            else:
+                x = self.emb(idx)       # (T, C)
+                is_seq = True
+
+        # Layer 0 ln0 (only first block has it)
+        x = self.blocks[0].ln0(x)
+
+        v_first = torch.empty_like(x)
+        for i, block in enumerate(self.blocks):
+            ln1, ln2 = block.ln1, block.ln2
+            att = block.att
+            ffn = block.ffn
+
+            xx = ln1(x)
+            if is_seq:
+                xx, state[i*3+0], state[i*3+1], v_first = _tmix_seq(att, i, xx, state[i*3+0], state[i*3+1], v_first)
+            else:
+                xx, state[i*3+0], state[i*3+1], v_first = _tmix_one(att, i, xx, state[i*3+0], state[i*3+1], v_first)
+            x = x + xx
+
+            xx = ln2(x)
+            if is_seq:
+                xx, state[i*3+2] = _cmix_seq(ffn, xx, state[i*3+2])
+            else:
+                xx, state[i*3+2] = _cmix_one(ffn, xx, state[i*3+2])
+            x = x + xx
+
+        if is_seq and not full_output:
+            x = x[-1]
+        x = self.ln_out(x)
+        logits = self.head(x)
+        return logits, state
+
     if int(os.environ["RWKV_HEAD_L2WRAP_CE_CHUNK"]) > 0: # saves 70~80% VRAM
 
         def forward(self, idx):
@@ -863,11 +1184,37 @@ class RWKV(pl.LightningModule):
                 # CE kernel doesn't support; apply head explicitly and use F.cross_entropy.
                 hidden = self(idx)
                 logits = self.head(hidden)
-                return F.cross_entropy(
+                # Manual sum / n_valid avoids NaN when a batch has zero valid
+                # (non -100) targets — F.cross_entropy(reduction='mean', ignore_index=-100)
+                # silently returns NaN in that case (0/0 in the per-sample average),
+                # and one NaN forever poisons Adam's m/v.
+                n_valid = (targets != -100).sum().clamp_min(1)
+                ce_sum = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
                     targets.view(-1),
                     ignore_index=-100,
+                    reduction="sum",
                 )
+                loss = ce_sum / n_valid
+                conf_lambda = float(getattr(self.args, "diff_conf_lambda", 0.0))
+                if conf_lambda > 0.0:
+                    loss = loss + conf_lambda * _diffusion_confidence_loss(logits, targets)
+                # Early warning: if loss / logits go non-finite, surface it loudly
+                # in the rank-0 log so we can catch it on the first occurrence
+                # rather than discover wrecked weights tens of steps later.
+                if not torch.isfinite(loss):
+                    rank_zero_info(
+                        f"[NaN-guard] non-finite loss at step {self.global_step}: "
+                        f"loss={loss.item()}, logits min={logits.min().item():.3g}, "
+                        f"max={logits.max().item():.3g}, n_valid={n_valid.item()}"
+                    )
+                with torch.no_grad():
+                    valid = targets != -100
+                    n_masked = valid.sum().clamp_min(1)
+                    correct = ((logits.argmax(-1) == targets) & valid).sum()
+                    self.trainer.my_diff_acc = (correct.float() / n_masked.float()).item()
+                    self.trainer.my_diff_n_masked = n_masked.item()
+                return loss
             hidden = self(idx)
             return head_l2wrap_cross_entropy(hidden, self.head.weight, targets)
 
@@ -885,11 +1232,36 @@ class RWKV(pl.LightningModule):
                 # Diffusion mode: per-token CE with ignore_index for non-b2 / non-masked
                 # positions and tail padding. The L2-wrap CE CUDA kernel doesn't support
                 # ignore_index, so fall back to PyTorch's F.cross_entropy.
-                return F.cross_entropy(
+                # Manual sum / n_valid avoids NaN when a batch has zero valid
+                # (non -100) targets — F.cross_entropy(reduction='mean', ignore_index=-100)
+                # silently returns NaN in that case (0/0), poisoning Adam state forever.
+                n_valid = (targets != -100).sum().clamp_min(1)
+                ce_sum = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
                     targets.view(-1),
                     ignore_index=-100,
+                    reduction="sum",
                 )
+                loss = ce_sum / n_valid
+                conf_lambda = float(getattr(self.args, "diff_conf_lambda", 0.0))
+                if conf_lambda > 0.0:
+                    loss = loss + conf_lambda * _diffusion_confidence_loss(logits, targets)
+                # Early warning: if loss / logits go non-finite, surface it loudly
+                # in the rank-0 log so we can catch it on the first occurrence
+                # rather than discover wrecked weights tens of steps later.
+                if not torch.isfinite(loss):
+                    rank_zero_info(
+                        f"[NaN-guard] non-finite loss at step {self.global_step}: "
+                        f"loss={loss.item()}, logits min={logits.min().item():.3g}, "
+                        f"max={logits.max().item():.3g}, n_valid={n_valid.item()}"
+                    )
+                with torch.no_grad():
+                    valid = targets != -100
+                    n_masked = valid.sum().clamp_min(1)
+                    correct = ((logits.argmax(-1) == targets) & valid).sum()
+                    self.trainer.my_diff_acc = (correct.float() / n_masked.float()).item()
+                    self.trainer.my_diff_n_masked = n_masked.item()
+                return loss
 
             ############################################################
             # slow pytorch version (!!! SLOW AND TAKES 40% MORE VRAM !!!)

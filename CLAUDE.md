@@ -51,9 +51,13 @@ fine.
   against y[i] = next token. Diffusion mode: dataset returns `x` and `y` of the **same
   length, no shift** — model output at index i predicts y[i] directly (target is the
   clean original token at masked positions, -100 elsewhere).
-- **Mask token.** `mask_id = vocab_size - 1` (= 65535 for RWKV world tokenizer). The
-  underlying RWKV-world vocab has 65525 real tokens padded to 65536 with 11 unused dummy
-  slots — we reuse one. **Do not extend vocab.**
+- **Mask token.** `mask_id = vocab_size - 1` (= 65535 for the model's padded vocab of
+  65536). The RWKV-world vocab file has 65529 real tokens (ids 1..65529) plus implicit
+  EOS at id 0 → 65530 used slots. The model embedding is padded to 65536 for
+  power-of-two friendliness, leaving ids 65530..65535 unused — we reuse id 65535 for
+  MASK. **Do not extend vocab.** (Heads-up: upstream tokenizer hardcodes the stale
+  value `vocab_size = 65525`; our [tokenizer/](tokenizer/) module derives it from the
+  data instead, returning 65530.)
 - **Tail pad.** Token 0 (EOS) is used as tail padding when `3 * n_blocks * block_size <
   ctx_len`. Loss is masked off there. Do **not** use the MASK token to pad — it would
   pollute its semantics.

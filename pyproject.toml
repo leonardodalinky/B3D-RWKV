@@ -6,8 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.5",
-    "pytorch-lightning>=1.9.5",
+    "pytorch-lightning>=1.9.5,<2.0",
     "deepspeed",
+    "bitsandbytes",
     "wandb",
     "ninja",
     "numpy",
@@ -20,6 +21,9 @@ data = [
     "lm-dataformat",  # used by third-party/json2binidx_tool
     "tokenizers",     # used by third-party/json2binidx_tool (HFTokenizer path)
     "tqdm",
+]
+eval = [
+    "lm-eval[math]>=0.4.12",
 ]
 
 [tool.uv.sources]
