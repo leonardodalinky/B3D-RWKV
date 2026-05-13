@@ -88,11 +88,37 @@ class MyDataset(Dataset):
 
         assert is_prime(args.magic_prime)
         assert args.magic_prime % 3 == 2
-        assert args.magic_prime / slot_count > 0.9 and args.magic_prime / slot_count <= 1, \
-            f"magic_prime ({args.magic_prime}) / slot_count ({slot_count}) = " \
-            f"{args.magic_prime / slot_count:.4f}, must be in (0.9, 1]. " \
-            f"In diffusion mode slot_count = number of valid docs after filtering; " \
-            f"recompute magic_prime with find_magic_prime.py --data_size {slot_count} --ctx_len 1."
+        # Upper bound is a hard error: magic_prime > slot_count causes the
+        # `slot_idx % len(valid_doc_indices)` wrap-around in __getitem__ to
+        # double-sample the first (magic_prime - slot_count) docs per period,
+        # silently breaking epoch semantics. Don't relax this.
+        assert args.magic_prime <= slot_count, \
+            f"magic_prime ({args.magic_prime}) > slot_count ({slot_count}); " \
+            f"recompute with find_magic_prime.py --data_size {slot_count} --ctx_len 1."
+        # Lower bound used to be a hard floor at 0.9 to catch "you forgot to
+        # rerun find_magic_prime after changing the dataset". Demoted to a
+        # warning so deliberate subset training is allowed — when
+        # magic_prime < slot_count, __getitem__ only ever indexes into the
+        # first magic_prime entries of valid_doc_indices, so the tail
+        # (binidx-ordered) is silently dropped. That's the desired behavior
+        # when you WANT a subset; just be aware it's deterministic + ordered.
+        coverage = args.magic_prime / slot_count
+        if coverage <= 0.9:
+            rank_zero_info(
+                f"########## WARNING: magic_prime ({args.magic_prime}) / slot_count "
+                f"({slot_count}) = {coverage:.4f} — training on the FIRST "
+                f"{args.magic_prime:,} of {slot_count:,} valid docs "
+                f"({coverage*100:.1f}%). The remaining "
+                f"{slot_count - args.magic_prime:,} docs ({(1-coverage)*100:.1f}%) "
+                f"will NEVER be sampled. If unintended, rerun find_magic_prime.py "
+                f"against the current .bin file. ##########"
+            )
+        # PL needs each "epoch" (40320 samples) to fit inside magic_prime so
+        # ii indices don't overflow. Hard-fail if you went way too small.
+        assert args.magic_prime >= self.samples_per_epoch, \
+            f"magic_prime ({args.magic_prime}) < samples_per_epoch " \
+            f"({self.samples_per_epoch}); one PL epoch wouldn't fit and " \
+            f"epoch_count would be 0. Pick a bigger subset."
 
     def __len__(self):
         return self.args.epoch_steps * self.args.micro_bsz

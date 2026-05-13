@@ -23,10 +23,11 @@ DEFAULT_SYSTEM_PROMPT = (
 # Reach the same tokenizer + diffusion_sample modules sweep_inference.py
 # uses. diffusion_sample.build_model also adds the repo root to sys.path
 # for `tokenizer`, but we add it now so `from tokenizer import ...` works
-# during engine construction too.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_TRAIN_DIR = _REPO_ROOT / "train"
-for p in (str(_REPO_ROOT), str(_TRAIN_DIR)):
+# during engine construction too. Layout: this file is at
+# DiffuRWKV/infer/serve/engine.py, so parent.parent.parent is DiffuRWKV/.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_INFER_DIR = _REPO_ROOT / "infer"
+for p in (str(_REPO_ROOT), str(_INFER_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -57,7 +58,7 @@ class InferenceEngine:
         max_tokens_cap: int,
     ) -> None:
         # Import here so the heavy CUDA-touching modules don't load at
-        # `import serve.engine` time (FastAPI startup imports the module
+        # `import infer.serve.engine` time (FastAPI startup imports the module
         # before lifespan fires; we want model loading to happen inside
         # lifespan).
         import diffusion_sample as ds  # type: ignore

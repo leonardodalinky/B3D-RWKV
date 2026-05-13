@@ -22,8 +22,8 @@ N_LAYER="32"
 N_EMBD="4096"
 
 # ---- Diffusion knobs ----
-CTX_LEN="6144"           # = 3 * BLOCK_SIZE * N_BLOCKS_PER_SAMPLE; here 3*32*32
-# CTX_LEN="12288"           #
+# CTX_LEN="6144"           # = 3 * BLOCK_SIZE * N_BLOCKS_PER_SAMPLE; here 3*32*32
+CTX_LEN="24576"           #
 BLOCK_SIZE="32"          # tokens per logical block
 MIN_R="0.0"
 MAX_R="1.0"
@@ -49,11 +49,12 @@ MAGIC_PRIME="1039631"
 # tokens trained with ACC_GRAD=4, set EXIT_TOKENS to 46B / 4 = 11.5B (which is
 # the value of real_tokens at which the cosine schedule terminates).
 # EXIT_TOKENS="1596873216"
-EXIT_TOKENS="1277498572" # 0.8
+# EXIT_TOKENS="1277498572" # 0.8
+EXIT_TOKENS="319374644" # 0.2
 
 VOCAB_SIZE="65536"
 
-PROJ_DIR="${PROJ_DIR:-out/diff-L${N_LAYER}-D${N_EMBD}-${MODEL_TYPE}-blk${BLOCK_SIZE}-ctx${CTX_LEN}_epoch2}"
+PROJ_DIR="${PROJ_DIR:-out/diff-L${N_LAYER}-D${N_EMBD}-${MODEL_TYPE}-blk${BLOCK_SIZE}-ctx${CTX_LEN}_epoch2_long_ctx}"
 mkdir -p "$PROJ_DIR"
 
 # ---- Optimizer / batch ----
@@ -62,14 +63,14 @@ mkdir -p "$PROJ_DIR"
 # leaves the largest headroom for wkv kernel scratchpad (which scales as
 # ~0.375 GB/B). ACC_GRAD=4 amortizes the CPU-Adam fixed overhead 4× and
 # matches the effective batch we'd want at LR=6e-5 sqrt-scaling.
-M_BSZ="${M_BSZ:-4}"
+M_BSZ="${M_BSZ:-1}"
 # LR sqrt-scaled from canonical 3e-5 @ effective_bsz=128 to effective_bsz=512:
 #   3e-5 × sqrt(512/128) = 3e-5 × 2 = 6e-5
 LR_INIT="${LR_INIT:-1e-5}"
 LR_FINAL="${LR_FINAL:-1e-6}"
 GRAD_CP="${GRAD_CP:-1}"
 EPOCH_SAVE="${EPOCH_SAVE:-5}"
-STRATEGY="${STRATEGY:-deepspeed_stage_2}"
+STRATEGY="${STRATEGY:-deepspeed_stage_3}"
 # epoch_steps with M_BSZ=16 = 5040/16 = 315 dataloader yields per epoch.
 # With ACC_GRAD=4 that's ~78 optimizer steps per epoch. Warmup of 100 steps
 # ≈ 1.3 epochs ramp-up, plenty for SFT continuation off rwkv-19.
@@ -78,7 +79,7 @@ WARMUP_STEPS="${WARMUP_STEPS:-100}"
 # optimizer step processes ACC_GRAD micro-batches before stepping. Useful
 # when a large micro_bsz OOMs but you still want big effective batch
 # (and to amortize stage_2_offload's CPU-Adam overhead).
-ACC_GRAD="${ACC_GRAD:-4}"
+ACC_GRAD="${ACC_GRAD:-16}"
 # Optimizer choice. Switch to adafactor if you want to drop _offload but Adam OOMs.
 #   adam       : 12 B/param fp32 Adam state. With offload it lives on CPU.
 #   adafactor  : 8 B/param (factorized v); GPU-only; ~3.6 GB/GPU savings vs Adam.
@@ -111,7 +112,7 @@ cd train
 
 #   --load_model "/data/rsync/RWKV/model/rwkv7-g1f-7.2b-20260414-ctx8192.pth" \
 python train.py \
-  --load_model "/data/rsync/RWKV/DiffuRWKV/train/out/diff-L32-D4096-x070-blk32-ctx6144/rwkv-final.pth" \
+  --load_model "/data/rsync/RWKV/DiffuRWKV/train/out/diff-L32-D4096-x070-blk32-ctx6144_epoch2/rwkv-final.pth" \
   --wandb "" \
   --proj_dir "$PROJ_DIR" \
   --my_testing "$MODEL_TYPE" \
@@ -147,7 +148,7 @@ python train.py \
   --diff_min_mask_ratio "$MIN_R" \
   --diff_max_mask_ratio "$MAX_R" \
   --diff_pad_id "$PAD_ID" \
-  --diff_conf_lambda 0.1 \
+  --diff_conf_lambda 0.5 \
   --d_decay_lora 128 \
   --d_aaa_lora 128 \
   --d_mv_lora 96 \

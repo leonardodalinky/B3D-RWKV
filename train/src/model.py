@@ -79,17 +79,68 @@ if 'x070' in os.environ["RWKV_MY_TESTING"]:
 
     # Stateful (RNN-mode) WKV kernel from upstream rwkv_v7_demo_fast.py — used by
     # RWKV.forward_fast for state-aware inference (no autograd, eval only).
-    load(name="wkv7s", sources=["cuda/wkv7s_op.cpp", "cuda/wkv7s.cu"], is_python_module=False,
-         verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"])
+    # Source lives under DiffuRWKV/infer/cuda/ (inference-only kernels are
+    # isolated there); resolved via absolute path so build_model's
+    # chdir(train/) for the other training-only kernels still works.
+    _INFER_CUDA_DIR = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "infer", "cuda")
+    )
+    load(name="wkv7s",
+         sources=[os.path.join(_INFER_CUDA_DIR, "wkv7s_op.cpp"),
+                  os.path.join(_INFER_CUDA_DIR, "wkv7s.cu")],
+         is_python_module=False, verbose=True,
+         extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"])
 
     def RWKV7S_OP(state, r, w, k, v, a, b):
-        """Stateful WKV-7 op. Inputs are (T, C); state is (H, N, N) fp32, mutated in place.
-        Returns y of shape (T, C). Caller's responsibility: bf16 / fp16 inputs, contiguous.
+        """Stateful WKV-7 op. Inputs are (T, C); state is (H, N, N) fp32.
+
+        In-place on ``state``. Two non-obvious things are required for
+        the op to behave correctly inside ``torch.cuda.graph()``:
+
+          1. The kernel (see wkv7s.cu) launches on PyTorch's current
+             stream via ``at::cuda::getCurrentCUDAStream()``. A naked
+             ``<<<grid, block>>>`` launch goes to the CUDA default
+             stream, which is NOT captured; the kernel runs during
+             capture but is silently dropped from the recorded graph,
+             producing the classic "eager matches, replay misses the
+             state mutation" symptom.
+
+          2. The schema string in wkv7s_op.cpp marks ``state`` and
+             ``y`` as ``Tensor(a!)`` / ``Tensor(b!)`` (mutable).
+             Without the schema, PyTorch infers a side-effect-free op
+             and the dispatcher elides the call. Required, not
+             optional.
         """
         T, C = r.shape
         H = C // HEAD_SIZE
-        y = torch.empty((T, C), device=r.device, dtype=r.dtype, requires_grad=False, memory_format=torch.contiguous_format)
+        y = torch.empty((T, C), device=r.device, dtype=r.dtype,
+                        requires_grad=False, memory_format=torch.contiguous_format)
         torch.ops.wkv7s.forward(1, T, C, H, state, r, w, k, v, a, b, y)
+        return y
+
+    # seq_v2 variant — same ABI, ported from BlinkDL/Albatross
+    # wkv_fp16_seq_v2_kernel. Uses cp.async ping-pong prefetch + packed
+    # bf16 __hfma2 for ~1.4-1.8x speedup vs wkv7s at (B=1, T>=8). Falls
+    # back to wkv7s when T < 8 (decode-style; ping-pong setup is wasted).
+    # Requires sm_80+; build flags pin both 8.0 and 9.0.
+    load(name="wkv7s_seqv2",
+         sources=[os.path.join(_INFER_CUDA_DIR, "wkv7s_seqv2_op.cpp"),
+                  os.path.join(_INFER_CUDA_DIR, "wkv7s_seqv2.cu")],
+         is_python_module=False, verbose=True,
+         extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3",
+                            "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}",
+                            "-gencode=arch=compute_80,code=sm_80",
+                            "-gencode=arch=compute_90,code=sm_90"])
+
+    def RWKV7S_OP_SEQV2(state, r, w, k, v, a, b):
+        """Same contract as RWKV7S_OP, dispatched to the seq_v2 kernel.
+        See RWKV7S_OP for the CUDA-Graph-correctness requirements
+        (current-stream launch + schema string)."""
+        T, C = r.shape
+        H = C // HEAD_SIZE
+        y = torch.empty((T, C), device=r.device, dtype=r.dtype,
+                        requires_grad=False, memory_format=torch.contiguous_format)
+        torch.ops.wkv7s_seqv2.forward(1, T, C, H, state, r, w, k, v, a, b, y)
         return y
 
 ########################################################################################################
@@ -924,9 +975,16 @@ def _tmix_seq(att, layer_id, x, x_prev, kv_state, v_first):
         v = v + (v_first - v) * torch.sigmoid(att.v0.view(-1) + (xv @ att.v1) @ att.v2)
 
     # Multi-token decay form (from demo_fast forward_seq) — log-domain for the wkv7s kernel.
+    # T >= 8: seqv2 kernel (cp.async ping-pong + bf16 __hfma2) is a clean
+    # win. T < 8 (incl. T==1 decode): pong setup is wasted; old kernel
+    # is faster and bit-equivalent. Disable seqv2 via RWKV_DISABLE_SEQV2=1.
     w_for_kernel = -F.softplus(-(att.w0.view(-1) + w_lora)) - 0.5
-    out = RWKV7S_OP(kv_state, r.contiguous(), w_for_kernel.contiguous(),
-                    k.contiguous(), v.contiguous(), (-kk).contiguous(), (kk * a).contiguous())
+    _disable_seqv2 = os.environ.get("RWKV_DISABLE_SEQV2", "0") == "1"
+    op = RWKV7S_OP_SEQV2 if (T >= 8 and not _disable_seqv2) else RWKV7S_OP
+    # op mutates kv_state in place; caller's state list slot is the same
+    # object that gets returned, so the (no-op) rebind keeps semantics.
+    out = op(kv_state, r.contiguous(), w_for_kernel.contiguous(),
+             k.contiguous(), v.contiguous(), (-kk).contiguous(), (kk * a).contiguous())
 
     out = F.group_norm(out.view(T, H * N), num_groups=H, weight=att.ln_x.weight, bias=att.ln_x.bias, eps=64e-5).view(T, H * N)
     out = out + ((r * k * att.r_k.view(-1)).view(T, H, N).sum(dim=-1, keepdim=True) * v.view(T, H, N)).view(T, H * N)
@@ -1119,7 +1177,6 @@ class RWKV(pl.LightningModule):
         Args:
             idx: ``int`` (single token), or 1-D ``LongTensor`` on cuda (a sequence).
             state: list of ``n_layer * 3`` tensors, or ``None`` to start from zero.
-                The list is mutated in place; the same list is returned.
             full_output: if False (default) and idx is a sequence, return logits for
                 the last position only. If True, return logits for every position.
 

@@ -37,7 +37,7 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage]
 
     # OpenAI sampling
-    temperature: float = 0.85
+    temperature: float = 0.8
     top_p: float = 0.9
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0   # mapped to DiffuRWKV count_penalty

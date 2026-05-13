@@ -58,7 +58,7 @@ def _build_engine() -> InferenceEngine:
         "steps": _env_int("STEPS", 32),
         "top_k": _env_int("TOP_K", 50),
         "decode_strategy": os.environ.get("DECODE_STRATEGY", "threshold"),
-        "conf_threshold": _env_float("CONF_THRESHOLD", 0.95),
+        "conf_threshold": _env_float("CONF_THRESHOLD", 0.9),
         "min_per_step": _env_int("MIN_PER_STEP", 0),
         "penalty_decay": _env_float("PENALTY_DECAY", 1.0),
         "penalize_prompt": bool(int(os.environ.get("PENALIZE_PROMPT", "0"))),

@@ -19,12 +19,12 @@ the cloned ctx_state and reads logits at the b2 (last B) positions:
         ctx_state = forward_fast(cur, ctx_state)  # advance through committed clean block
 
 Notes:
-- bf16 / GPU only. cuda/wkv7s.{cu,op.cpp} have been switched from at::Half
+- bf16 / GPU only. infer/cuda/wkv7s.{cu,op.cpp} have been switched from at::Half
   to at::BFloat16, so the state kernel matches training precision exactly.
 - forward_fast uses the wkv7s state kernel; no CHUNK_LEN alignment needed.
 
 Usage:
-  python train/diffusion_sample.py \
+  python infer/diffusion_sample.py \
       --ckpt out/diff-.../rwkv-9.pth \
       --n_layer 12 --n_embd 768 \
       --block_size 128 --gen_len 256 --steps 16 \
@@ -38,7 +38,7 @@ from types import SimpleNamespace
 
 import torch
 
-# Add repo root (parent of train/) to sys.path so `import tokenizer` works.
+# Add repo root (parent of infer/) to sys.path so `import tokenizer` works.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -48,18 +48,17 @@ from tokenizer import RWKVTokenizer  # noqa: E402
 def build_model(ckpt: str, args_for_model):
     os.environ["RWKV_HEAD_L2WRAP_CE_CHUNK"] = "0"
     os.environ["RWKV_JIT_ON"] = "1"
-    # The wkv7s state kernel (cuda/wkv7s.{cu,op.cpp}) is built for bf16 here
-    # (we toggled the typedef from at::Half to at::BFloat16). Numerics match
-    # training exactly. If you ever revert the typedef back to at::Half,
-    # change this to "fp16" and cast the model below to torch.float16.
+    # The wkv7s state kernel now lives at infer/cuda/wkv7s.{cu,op.cpp} and is
+    # loaded by model.py via an absolute path (so its location is independent
+    # of cwd). The typedef in wkv7s.cu is bf16, matching training exactly.
     os.environ["RWKV_FLOAT_MODE"] = "bf16"
     os.environ["RWKV_MY_TESTING"] = args_for_model.my_testing
     os.environ["RWKV_CTXLEN"] = str(args_for_model.ctx_len)
     os.environ["RWKV_HEAD_SIZE"] = str(args_for_model.head_size)
 
-    # model.py JIT-loads "cuda/*.cu" with relative paths, so we must cwd into
-    # train/ before importing it. Save the original cwd so --ckpt etc. resolve.
-    train_dir = os.path.dirname(os.path.abspath(__file__))
+    # model.py still JIT-loads training kernels under train/cuda/ with
+    # relative "cuda/..." paths, so we cwd into train/ before importing it.
+    train_dir = os.path.abspath(os.path.join(_REPO_ROOT, "train"))
     sys.path.insert(0, train_dir)
     _orig_cwd = os.getcwd()
     os.chdir(train_dir)
@@ -101,6 +100,128 @@ def build_model(ckpt: str, args_for_model):
 def _clone_state(state):
     """Deep-copy a state list so caller can branch off without polluting the original."""
     return [s.clone() for s in state]
+
+
+class GraphStepRunner:
+    """CUDA-Graph-captured one-denoise-step runner.
+
+    Backstory: at the 7.2B / T=64 / B=1 inference shape, ``forward_fast``
+    is **CPU-launch-bound** (Self CPU 40 ms vs Self CUDA 13 ms per call —
+    Python+PyTorch fires 1500+ kernel launches per step, each ~10 us).
+    A CUDA Graph captures the full kernel sequence once and replays it
+    on each denoise step with a single ``cudaGraphLaunch`` — eliminating
+    most of the per-step CPU dispatch cost. Measured speedup: **~1.9x**
+    on the denoise loop body (26.3 ms eager → 13.7 ms graph).
+
+    The graph captures:
+      1. ``working_state[i].copy_(static_ctx_state[i])`` for all i
+         — fresh state at the start of every replay (wkv7s mutates
+         state in place, so each step needs a fresh copy).
+      2. ``forward_fast(static_inp, working_state, full_output=True)``
+      3. ``static_logits.copy_(<logits>)``
+
+    Capture correctness depends on the wkv7s/wkv7s_seqv2 kernels
+    launching on PyTorch's current stream (not the CUDA default
+    stream) — see [train/src/model.py:RWKV7S_OP] docstring for the
+    full rationale.
+
+    Public protocol:
+      * ``set_ctx_state(ctx_state)``  — call once per block (the
+        static ctx_state buffer is filled from the live ctx_state).
+      * ``step(cur_tokens)``  — returns ``static_logits`` (bf16,
+        shape (2*B, V)); treat as read-only since the next replay
+        overwrites the same buffer.
+
+    Block size is baked into the captured graph; one runner serves
+    one block_size value. ``model.init_state()`` is used to size the
+    state buffers — keep block_size and model architecture stable
+    across the runner's lifetime.
+    """
+
+    def __init__(self, model, block_size: int, mask_id: int):
+        self.model = model
+        self.block_size = block_size
+        self.mask_id = mask_id
+
+        # Static input: filled with MASK initially; the caller's `step`
+        # updates the two halves (b1 and b2) before each replay.
+        self.static_inp = torch.full(
+            (2 * block_size,), mask_id, dtype=torch.long, device="cuda"
+        )
+
+        # Source ctx state — caller writes this once per block via
+        # set_ctx_state; the graph reads it on every replay.
+        self.static_ctx_state = model.init_state()
+        # Working state — mutated in place by wkv7s during forward_fast;
+        # reset each replay from static_ctx_state inside the graph.
+        self.static_working_state = model.init_state()
+        # Output logits; size set after first warmup forward.
+        self.static_logits = None
+
+        # graph_pool_handle lets torch.cuda.graph track any transient
+        # allocs that forward_fast does inside the graph (e.g. v_first
+        # = torch.empty_like(x)) — same memory address every replay.
+        self.pool = torch.cuda.graph_pool_handle()
+        self.graph = None
+        self._captured = False
+
+    @torch.no_grad()
+    def warmup_and_capture(self, n_warmup: int = 3) -> None:
+        """Run the step n_warmup times to JIT-compile + populate caches,
+        then capture the kernel sequence into a CUDA graph.
+
+        forward_fast does rebind list elements of ``working_state``
+        during its run, but that's pure Python — captured kernels see
+        the data_ptr at dispatch time, so the bind state doesn't matter
+        for replay. The state reset (working_state <- ctx_state) lives
+        INSIDE the captured graph — one big batch of copy_'s followed
+        by forward_fast, replayed atomically.
+        """
+        # Warmup on a side stream so we don't pollute the default stream's
+        # capture state.
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(n_warmup):
+                for dst, src in zip(self.static_working_state, self.static_ctx_state):
+                    dst.copy_(src)
+                logits, _ = self.model.forward_fast(
+                    self.static_inp, self.static_working_state,
+                    full_output=True,
+                )
+            self.static_logits = torch.empty_like(logits)
+        torch.cuda.current_stream().wait_stream(s)
+        torch.cuda.synchronize()
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph, pool=self.pool):
+            # Reset working_state from ctx_state inside the graph so each
+            # replay starts from a fresh ctx; the wkv kernels mutate it
+            # in place, so each step needs the fresh starting copy.
+            for dst, src in zip(self.static_working_state, self.static_ctx_state):
+                dst.copy_(src)
+            logits, _ = self.model.forward_fast(
+                self.static_inp, self.static_working_state,
+                full_output=True,
+            )
+            self.static_logits.copy_(logits)
+        self._captured = True
+
+    def set_ctx_state(self, ctx_state) -> None:
+        """Copy the live ctx_state into the static source buffer.
+        Call once per block, BEFORE the denoise loop."""
+        for dst, src in zip(self.static_ctx_state, ctx_state):
+            dst.copy_(src)
+
+    def step(self, cur_tokens: torch.Tensor) -> torch.Tensor:
+        """Update the input from cur_tokens (b1+b2 both = cur), replay
+        the captured graph, return the freshly-computed static_logits."""
+        assert self._captured, "call warmup_and_capture() before step()"
+        # Update the (2*B,) input: both halves carry the current best guess.
+        self.static_inp[: self.block_size].copy_(cur_tokens)
+        self.static_inp[self.block_size :].copy_(cur_tokens)
+        self.graph.replay()
+        return self.static_logits
 
 
 # Tokens reserved for training-only roles, never emitted during real generation.
@@ -169,6 +290,7 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
                        strategy: str = "threshold",
                        conf_threshold: float = 0.95,
                        min_per_step: int = 0,
+                       graph_runner: "GraphStepRunner | None" = None,
                        verbose: bool = False) -> torch.Tensor:
     """Iterative denoising of one block, starting from ``ctx_state`` (not mutated).
 
@@ -180,7 +302,11 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
 
     * ``threshold`` — LLaDA-2.0 threshold + fallback:
         Phase 1: accept ALL still-masked positions whose token probability
-                 exceeds ``conf_threshold`` (0.95 in the paper).
+                 exceeds ``conf_threshold`` (0.95 in the paper). Probability
+                 here is read off the RAW (un-temperature-scaled, un-top-k,
+                 un-top-p) softmax, so ``conf_threshold`` keeps a stable
+                 meaning regardless of sampling shape — exactly LLaDA's
+                 generate.py convention.
         Phase 2: if Phase 1 yielded fewer than ``min_per_step`` commits,
                  fallback: commit the top-``min_per_step`` most-confident
                  positions instead (regardless of threshold).
@@ -199,14 +325,27 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
         # uncertain run is no worse than the old behavior.
         min_per_step = max(1, block_size // max(steps, 1))
 
+    # One-time setup if running through a CUDA graph runner. The runner
+    # holds static buffers; the ctx_state→working_state copy lives inside
+    # the captured graph, so we only need to update the SOURCE buffer
+    # (static_ctx_state) once per block here, not per step.
+    if graph_runner is not None:
+        graph_runner.set_ctx_state(ctx_state)
+
     for t in range(1, steps + 1):
         if not is_masked.any():
             break  # threshold mode may finish early
-        # Branch off ctx_state — wkv7s mutates state in place, so we must clone.
-        step_state = _clone_state(ctx_state)
-        # b1 + b2 (both = current best guess). Length 2B, decoupled from ctx length.
-        inp = torch.cat([cur, cur], dim=0)
-        logits, _ = model.forward_fast(inp, step_state, full_output=True)
+        if graph_runner is not None:
+            # Fast path: replay the captured graph. Returns static_logits
+            # (bf16, shape (2*B, V)); the graph re-runs the
+            # ctx_state→working_state copy on every replay so wkv7s's
+            # in-place state mutation doesn't pollute ctx across steps.
+            logits = graph_runner.step(cur)
+        else:
+            # Eager path (kept for parity testing / non-graph environments).
+            step_state = _clone_state(ctx_state)
+            inp = torch.cat([cur, cur], dim=0)
+            logits, _ = model.forward_fast(inp, step_state, full_output=True)
         b2_logits = logits[block_size:].float()         # [B, V]
         # Always suppress PAD (65534) and MASK (65535): these are training-only
         # tokens and there's no valid byte-level decoding for them. The model
@@ -245,42 +384,52 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
 
         # Subtract presence + frequency penalty (broadcast across all B
         # positions). `penalty[v]` is the precomputed per-vocab adjustment
-        # built from history. Applied BEFORE temperature/top_k/top_p so the
-        # penalty's effect propagates through all subsequent shaping.
+        # built from history. Applied to b2_logits in place so it feeds
+        # both the raw-confidence probs and the sampling-shaped probs;
+        # the penalty's job is to prevent committing repetitive tokens,
+        # so it MUST flow into the commit decision via confidence too.
         if penalty is not None:
             b2_logits = b2_logits - penalty.unsqueeze(0)
 
+        # RAW probs (post-penalty, pre-shaping) — used to measure
+        # confidence. This matches LLaDA's official generate.py: the
+        # commit-decision quantity is the model's own belief about the
+        # sampled token, NOT the temperature/top-k/top-p-shaped sampling
+        # distribution. Decoupling these means `conf_threshold = 0.95`
+        # has a stable meaning regardless of T/k/p.
+        raw_probs = b2_logits.softmax(dim=-1)
+
+        # SAMPLING-shaped logits (T / top-k / top-p). Independent copy
+        # via `b2_logits + 0` would force a tensor clone, but the
+        # subsequent ops below all return new tensors, so we can just
+        # rebind shaped_logits to b2_logits and the original is preserved.
+        shaped_logits = b2_logits
         if temperature != 1.0:
-            b2_logits = b2_logits / max(temperature, 1e-6)
+            shaped_logits = shaped_logits / max(temperature, 1e-6)
         if top_k > 0:
-            v, _ = torch.topk(b2_logits, k=top_k, dim=-1)
-            b2_logits = b2_logits.masked_fill(b2_logits < v[:, -1:], float("-inf"))
+            v, _ = torch.topk(shaped_logits, k=top_k, dim=-1)
+            shaped_logits = shaped_logits.masked_fill(shaped_logits < v[:, -1:], float("-inf"))
         if 0.0 < top_p < 1.0:
-            # Nucleus sampling: per-position keep the smallest set of tokens
-            # whose cumulative prob exceeds top_p. Vectorized across B.
-            sorted_logits, sorted_idx = torch.sort(b2_logits, descending=True, dim=-1)
+            # Nucleus sampling: per-position keep the smallest token set whose
+            # cumulative prob exceeds top_p. Vectorized across B.
+            sorted_logits, sorted_idx = torch.sort(shaped_logits, descending=True, dim=-1)
             cumprobs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-            # mask of tokens to remove (those AFTER the first one that pushed
-            # cumulative prob over top_p)
             remove_sorted = cumprobs > top_p
-            # always keep the very first one (highest-prob)
             remove_sorted[..., 1:] = remove_sorted[..., :-1].clone()
             remove_sorted[..., 0] = False
-            # scatter back to original vocab order, set those logits to -inf
-            remove_mask = torch.zeros_like(b2_logits, dtype=torch.bool)
+            remove_mask = torch.zeros_like(shaped_logits, dtype=torch.bool)
             remove_mask.scatter_(-1, sorted_idx, remove_sorted)
-            b2_logits = b2_logits.masked_fill(remove_mask, float("-inf"))
-        probs = b2_logits.softmax(dim=-1)
-        # When temperature > 0 we sample to break out of argmax-induced
-        # repetition loops (esp. relevant for early-training models that
-        # have a sharp prior on common phrases). Confidence is then the
-        # probability of the *sampled* token, not the argmax probability,
-        # so that commit ordering still favors high-confidence positions.
+            shaped_logits = shaped_logits.masked_fill(remove_mask, float("-inf"))
+        shaped_probs = shaped_logits.softmax(dim=-1)
+
+        # Sample from SHAPED distribution; read confidence off RAW probs.
+        # (LLaDA uses gumbel-max for sampling; multinomial(softmax) here
+        # is mathematically equivalent.)
         if temperature > 0:
-            pred = torch.multinomial(probs, num_samples=1).squeeze(-1)
-            confidence = probs.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
+            pred = torch.multinomial(shaped_probs, num_samples=1).squeeze(-1)
         else:
-            confidence, pred = probs.max(dim=-1)
+            pred = shaped_probs.argmax(dim=-1)
+        confidence = raw_probs.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
         # Already-committed positions don't compete in this round's argsort.
         confidence = confidence.masked_fill(~is_masked, float("-inf"))
 
@@ -371,6 +520,28 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
     n_blocks = math.ceil(gen_len / block_size)
     eos_id = 0    # RWKV-world tokenizer's EOS
     eos_pos_in_concat = None
+
+    # CUDA Graph path: capture forward_fast once and replay it for every
+    # denoise step. Eliminates ~95% of the per-step CPU launch overhead
+    # (~1500 ops × 10us per step). Made possible by two precursors:
+    #   (a) refactored forward_fast to update state in-place via copy_,
+    #       no list-rebinding (so captured kernels target stable addrs);
+    #   (b) wkv7s + wkv7s_seqv2 op bindings declare Tensor(a!) schema so
+    #       PyTorch can track the in-place state/y mutations during
+    #       capture and order kernels correctly across replays.
+    # Disable with DIFF_DISABLE_CUDA_GRAPH=1 for debugging.
+    graph_runner = None
+    if os.environ.get("DIFF_DISABLE_CUDA_GRAPH", "0") != "1":
+        if verbose:
+            print("[graph] capturing CUDA graph for forward_fast (one-time)...",
+                  flush=True)
+        t0 = time.time() if verbose else None
+        graph_runner = GraphStepRunner(model, block_size, mask_id)
+        graph_runner.warmup_and_capture(n_warmup=3)
+        if verbose:
+            print(f"[graph] capture done in {time.time() - t0:.1f}s",
+                  flush=True)
+
     for bi in range(n_blocks):
         # Build the per-vocab penalty tensor for this block from current
         # token_count. Recomputed each block so decay shows up.
@@ -392,6 +563,7 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
                                  strategy=strategy,
                                  conf_threshold=conf_threshold,
                                  min_per_step=min_per_step,
+                                 graph_runner=graph_runner,
                                  verbose=verbose)
         committed.append(blk)
         _, ctx_state = model.forward_fast(blk, ctx_state, full_output=False)

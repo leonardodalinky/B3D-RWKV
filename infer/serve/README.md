@@ -100,7 +100,7 @@ uv sync --group serve
 ## Run
 
 ```bash
-CKPT=/path/to/rwkv-N.pth MODEL_NAME=diffurwkv python -m serve
+CKPT=/path/to/rwkv-N.pth MODEL_NAME=diffurwkv python -m infer.serve
 ```
 
 You should see `[serve] engine ready ...` followed by uvicorn's listen
