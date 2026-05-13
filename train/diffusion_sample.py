@@ -168,7 +168,8 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
                        penalty: torch.Tensor | None = None,
                        strategy: str = "threshold",
                        conf_threshold: float = 0.95,
-                       min_per_step: int = 0) -> torch.Tensor:
+                       min_per_step: int = 0,
+                       verbose: bool = False) -> torch.Tensor:
     """Iterative denoising of one block, starting from ``ctx_state`` (not mutated).
 
     Two commit strategies:
@@ -218,7 +219,10 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
         b2_logits[:, mask_id] = float("-inf")
 
         # ---- DEBUG: dump logits stats on the very first denoise step ----
-        if t == 1 and not getattr(denoise_block_fast, "_dbg_done", False):
+        # Gated on `verbose`; the function-attribute `_dbg_done` keeps the
+        # dump one-shot per session (callers reset it before each run if
+        # they want fresh diagnostics).
+        if verbose and t == 1 and not getattr(denoise_block_fast, "_dbg_done", False):
             denoise_block_fast._dbg_done = True
             full_lg = logits.float()
             print(f"[DBG] full logits: shape={tuple(full_lg.shape)} "
@@ -303,17 +307,19 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
             raise ValueError(f"unknown strategy: {strategy!r}")
 
         if idx.numel() > 0:
-            n_pred_eos = int((pred == 0).sum().item())
-            n_pred_mask = int((pred == mask_id).sum().item())
-            print(f"[DBG step {t}] strategy={strategy} commits={idx.numel()}  "
-                  f"#pred==0: {n_pred_eos}/{block_size}  "
-                  f"#pred==MASK: {n_pred_mask}/{block_size}")
-            print(f"[DBG step {t}] commit idx={sorted(idx.tolist())[:8]}...  "
-                  f"  vals={pred[idx].tolist()[:8]}")
+            if verbose:
+                n_pred_eos = int((pred == 0).sum().item())
+                n_pred_mask = int((pred == mask_id).sum().item())
+                print(f"[DBG step {t}] strategy={strategy} commits={idx.numel()}  "
+                      f"#pred==0: {n_pred_eos}/{block_size}  "
+                      f"#pred==MASK: {n_pred_mask}/{block_size}")
+                print(f"[DBG step {t}] commit idx={sorted(idx.tolist())[:8]}...  "
+                      f"  vals={pred[idx].tolist()[:8]}")
             cur[idx] = pred[idx]
             is_masked[idx] = False
-            print(f"[DBG step {t}] cur[:8]={cur[:8].tolist()}  "
-                  f"is_masked.sum()={int(is_masked.sum().item())}")
+            if verbose:
+                print(f"[DBG step {t}] cur[:8]={cur[:8].tolist()}  "
+                      f"is_masked.sum()={int(is_masked.sum().item())}")
 
     # Final cleanup: any still-masked position -> argmax from the last step's logits.
     if is_masked.any():
@@ -326,16 +332,24 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
             temperature: float, top_k: int, top_p: float,
             strategy: str, conf_threshold: float, min_per_step: int,
             presence_penalty: float, count_penalty: float, penalty_decay: float,
-            penalize_prompt: bool):
+            penalize_prompt: bool,
+            verbose: bool = False) -> tuple[str, str, int]:
     """Run one generation with a pre-loaded model and tokenizer.
 
-    Lifted out of ``main`` so callers (e.g. test/sweep_inference.py) can keep
-    the model resident in GPU memory and only vary the sampling knobs.
-    Prints per-block partials and the final generation to stdout.
+    Returns ``(text, finish_reason, n_completion_tokens)`` where ``finish_reason``
+    is ``"stop"`` if the model emitted EOS (id 0) within ``gen_len`` and
+    ``"length"`` if the budget ran out. ``n_completion_tokens`` is the length
+    of the returned token sequence after EOS truncation.
+
+    All progress output (per-block partials, ``=== final generation ===``,
+    ``[DBG]`` lines from ``denoise_block_fast``) is gated on ``verbose``;
+    by default this function is silent so HTTP/test callers can use the
+    return value directly without parsing stdout.
     """
     prompt_ids = tok.encode(prompt_text) if prompt_text else []
-    print(f"prompt: {prompt_text!r}  ({len(prompt_ids)} tokens)")
-    print(f"generating {gen_len} tokens in blocks of {block_size} x {steps} steps each")
+    if verbose:
+        print(f"prompt: {prompt_text!r}  ({len(prompt_ids)} tokens)")
+        print(f"generating {gen_len} tokens in blocks of {block_size} x {steps} steps each")
 
     if prompt_ids:
         prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long, device="cuda")
@@ -377,7 +391,8 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
                                  penalty=penalty,
                                  strategy=strategy,
                                  conf_threshold=conf_threshold,
-                                 min_per_step=min_per_step)
+                                 min_per_step=min_per_step,
+                                 verbose=verbose)
         committed.append(blk)
         _, ctx_state = model.forward_fast(blk, ctx_state, full_output=False)
 
@@ -398,31 +413,39 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
         # AFTER the EOS are noise the sampler was forced to fill — drop
         # them. Without this, gen_len always materializes in full.
         eos_in_blk = (blk == eos_id).nonzero(as_tuple=True)[0]
+        first_eos_local = None
         if eos_in_blk.numel() > 0:
             first_eos_local = int(eos_in_blk[0].item())
             eos_pos_in_concat = sum(b.numel() for b in committed[:-1]) + first_eos_local
 
-        # Decode partial output. If EOS was just hit, truncate to it so the
-        # noise the sampler had to fill after EOS doesn't pollute the
-        # progress print (which is also what causes mid-utf8 decode errs).
-        partial_ids = torch.cat(committed).tolist()
-        if eos_pos_in_concat is not None:
-            partial_ids = partial_ids[: eos_pos_in_concat]
-        partial = _safe_decode(tok, partial_ids)
-        print(f"--- after block {bi+1}/{n_blocks} ---")
-        print(partial)
+        if verbose:
+            # Decode partial output. If EOS was just hit, truncate to it so the
+            # noise the sampler had to fill after EOS doesn't pollute the
+            # progress print (which is also what causes mid-utf8 decode errs).
+            partial_ids = torch.cat(committed).tolist()
+            if eos_pos_in_concat is not None:
+                partial_ids = partial_ids[: eos_pos_in_concat]
+            partial = _safe_decode(tok, partial_ids)
+            print(f"--- after block {bi+1}/{n_blocks} ---")
+            print(partial)
 
         if eos_pos_in_concat is not None:
-            print(f"[stop] EOS detected at block {bi+1} pos {first_eos_local} -> truncating")
+            if verbose:
+                print(f"[stop] EOS detected at block {bi+1} pos {first_eos_local} -> truncating")
             break
 
     all_out = torch.cat(committed)
     if eos_pos_in_concat is not None:
         out_ids = all_out[: eos_pos_in_concat].tolist()
+        finish_reason = "stop"
     else:
         out_ids = all_out[: gen_len].tolist()
-    print("\n=== final generation ===")
-    print(_safe_decode(tok, out_ids))
+        finish_reason = "length"
+    text = _safe_decode(tok, out_ids)
+    if verbose:
+        print("\n=== final generation ===")
+        print(text)
+    return text, finish_reason, len(out_ids)
 
 
 def main():
@@ -526,7 +549,8 @@ def main():
                     args.temperature, args.top_k, args.top_p,
                     args.decode_strategy, args.conf_threshold, args.min_per_step,
                     args.presence_penalty, args.count_penalty, args.penalty_decay,
-                    args.penalize_prompt)
+                    args.penalize_prompt,
+                    verbose=True)
             print()
     else:
         run_one(model, tok, mask_id, args.vocab_size,
@@ -534,7 +558,8 @@ def main():
                 args.temperature, args.top_k, args.top_p,
                 args.decode_strategy, args.conf_threshold, args.min_per_step,
                 args.presence_penalty, args.count_penalty, args.penalty_decay,
-                args.penalize_prompt)
+                args.penalize_prompt,
+                verbose=True)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,9 @@ data = [
 eval = [
     "lm-eval[math]>=0.4.12",
 ]
+serve = [
+    "fastapi[standard]>=0.136,<1.0",
+]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]
