@@ -11,7 +11,7 @@ common knobs as env vars so you can override without editing files.
 bash infer/run_inference.sh
 
 # Pick a different checkpoint
-CKPT=train/out/diff-L32-D4096-x070-blk32-ctx6144_fixEOF/rwkv-4.pth \
+CKPT=train/out/diff-L32-D4096-x070-blk32-ctx6144/rwkv-4.pth \
   bash infer/run_inference.sh
 
 # Different prompt
@@ -42,7 +42,7 @@ TEMP=0 \
 
 | Var | Default | What it does |
 |---|---|---|
-| `CKPT` | `train/out/diff-L32-D4096-x070-blk32-ctx6144_fixEOF/rwkv-final.pth` | Model weights path |
+| `CKPT` | `train/out/diff-L32-D4096-x070-blk32-ctx6144/rwkv-final.pth` | Model weights path |
 | `PROMPT` | `User: Briefly explain the acronym RWKV.\n\nAssistant:` | Prompt text (use `$'...'` for `\n`) |
 | `GEN_LEN` | 128 | Tokens to generate after prompt |
 | `STEPS` | 32 | Denoise iterations per logical block (≤ block_size) |

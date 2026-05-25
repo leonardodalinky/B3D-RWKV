@@ -1,0 +1,36 @@
+# pass@k variant of humaneval. run_eval.sh substitutes __PASS_K__ at launch.
+# Sampling is forced ON (do_sample=true, temperature>0) -- repeats=K with
+# greedy would just produce K identical predictions and pass@K would degenerate
+# to pass@1. CLI --gen_kwargs is merged in, so PASSK_TEMPERATURE from
+# run_eval.sh overrides the value here.
+task: humaneval_passk
+dataset_path: openai/openai_humaneval
+unsafe_code: true
+output_type: generate_until
+test_split: test
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{test}}\ncheck({{entry_point}})"
+repeats: __PASS_K__
+metric_list:
+  - metric: !function utils.pass_at_k
+    aggregation: mean
+    higher_is_better: true
+    k: [__PASS_K__]
+generation_kwargs:
+  until:
+    - "\nclass"
+    - "\ndef"
+    - "\n#"
+    - "\nif"
+    - "\nprint"
+  max_gen_toks: 1024
+  do_sample: true
+  temperature: 0.8
+num_fewshot: 0
+filter_list:
+  - name: "create_test"
+    filter:
+      - function: "custom"
+        filter_fn: !function utils.build_predictions
+metadata:
+  version: 1.0

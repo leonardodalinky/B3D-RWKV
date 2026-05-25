@@ -8,8 +8,12 @@ committed per denoise step in steady state — see threshold strategy).
 This measures the inner-loop throughput, NOT including ckpt load,
 prompt prefill, or post-block ctx_state advance.
 """
+
 from __future__ import annotations
-import os, sys, time
+
+import os
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,13 +30,28 @@ import diffusion_sample as ds  # noqa
 
 def build_args():
     return SimpleNamespace(
-        n_layer=32, n_embd=4096, dim_att=4096,
+        n_layer=32,
+        n_embd=4096,
+        dim_att=4096,
         dim_ffn=int((4096 * 3.5) // 32 * 32),
-        head_size=64, vocab_size=65536, ctx_len=4096,
-        my_testing="x070", grad_cp=0, weight_decay=0.0,
-        lr_init=0.0, lr_final=0.0, betas=(0.9, 0.99), adam_eps=1e-18,
-        layerwise_lr=0, my_pile_stage=0, train_stage=0, diffusion_mode=0,
-        d_decay_lora=128, d_aaa_lora=128, d_mv_lora=96, d_gate_lora=480,
+        head_size=64,
+        vocab_size=65536,
+        ctx_len=4096,
+        my_testing="x070",
+        grad_cp=0,
+        weight_decay=0.0,
+        lr_init=0.0,
+        lr_final=0.0,
+        betas=(0.9, 0.99),
+        adam_eps=1e-18,
+        layerwise_lr=0,
+        my_pile_stage=0,
+        train_stage=0,
+        diffusion_mode=0,
+        d_decay_lora=128,
+        d_aaa_lora=128,
+        d_mv_lora=96,
+        d_gate_lora=480,
     )
 
 
@@ -99,7 +118,7 @@ def main():
     # committed tokens per `block_size`-step block, tok/s = (block /
     # block_steps) / ms_per_step / 1000. For a model that commits more
     # tokens per step the effective tok/s is higher; this is a floor.
-    eager_toks = (BLOCK / BLOCK) / (eager_ms / 1000)        # 1 tok/step
+    eager_toks = (BLOCK / BLOCK) / (eager_ms / 1000)  # 1 tok/step
     graph_toks = (BLOCK / BLOCK) / (graph_ms / 1000)
     print(f"\n  At 1 commit/step (worst case threshold):")
     print(f"    Eager:      {eager_toks:.1f} tok/s")

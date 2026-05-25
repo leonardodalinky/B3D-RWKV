@@ -6,18 +6,20 @@ sampling knobs, awaits inference on a worker thread (so the asyncio loop
 stays responsive for queued requests), and packages the result back into
 an OpenAI-style ChatCompletionResponse.
 """
+
 from __future__ import annotations
 
 import asyncio
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 DEFAULT_SYSTEM_PROMPT = (
-    "System: You are a helpful assistant. Respond in a concise and informative manner.\n\n"
+    "System: You are a helpful assistant. Think briefly and carefully without repeating words.\n\n"
 )
 
 # Reach the same tokenizer + diffusion_sample modules sweep_inference.py
@@ -55,6 +57,7 @@ class InferenceEngine:
         model_args: SimpleNamespace,
         *,
         defaults: dict[str, Any],
+        max_tokens_default: int,
         max_tokens_cap: int,
     ) -> None:
         # Import here so the heavy CUDA-touching modules don't load at
@@ -62,6 +65,7 @@ class InferenceEngine:
         # before lifespan fires; we want model loading to happen inside
         # lifespan).
         import diffusion_sample as ds  # type: ignore
+
         from tokenizer import RWKVTokenizer  # type: ignore
 
         self._ds = ds
@@ -70,7 +74,14 @@ class InferenceEngine:
         self.vocab_size = int(model_args.vocab_size)
         self.mask_id = self.vocab_size - 1
         self.defaults = defaults
+        self.max_tokens_default = max_tokens_default
         self.max_tokens_cap = max_tokens_cap
+        # Per-request speed log: file path is fixed at engine startup so
+        # all requests served by this process append to the same file,
+        # but a fresh restart creates a new file (no cross-run mixing).
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.speed_csv_path = f"/tmp/infer_speed_{ts}.csv"
+        print(f"[engine] speed log → {self.speed_csv_path}", flush=True)
         # Serialize inference: only one request goes through the GPU at a
         # time; the rest queue at this lock. `asyncio.to_thread` keeps the
         # event loop free to accept and queue more requests while one is
@@ -166,16 +177,21 @@ class InferenceEngine:
                 f"(finish={finish_reason})",
                 flush=True,
             )
+            # Append per-request speed sample for offline analysis.
+            # Inside the semaphore, so writes are naturally serialized; no
+            # file lock needed. Failures are non-fatal (e.g. /tmp full).
+            try:
+                with open(self.speed_csv_path, "a") as _csv:
+                    _csv.write(f"{n_completion},{elapsed:.6f}\n")
+            except OSError as e:
+                print(f"[engine] WARN: could not write {self.speed_csv_path}: {e}", flush=True)
 
         # When the request enabled think mode (prompt was primed with
         # "Assistant: <think>"), peel off the reasoning span and surface
         # it as a separate field. Matches the DeepSeek / vLLM convention
         # so OpenAI-compatible clients can choose to hide or render
         # reasoning independently of the final answer.
-        think_enabled = (
-            req.reasoning_effort is not None
-            and req.reasoning_effort != "minimal"
-        )
+        think_enabled = req.reasoning_effort is not None and req.reasoning_effort != "minimal"
         reasoning_content, content = self._split_reasoning(text, think_enabled=think_enabled)
 
         # Prompt token count via the tokenizer (cheap; same routine
@@ -232,21 +248,41 @@ class InferenceEngine:
         thread via asyncio.to_thread so the event loop keeps draining HTTP.
         """
         return self._ds.run_one(
-            self.model, self.tok, self.mask_id, self.vocab_size,
-            prompt, gen_len, sampling["steps"], sampling["block_size"],
-            sampling["temperature"], sampling["top_k"], sampling["top_p"],
-            sampling["decode_strategy"], sampling["conf_threshold"], sampling["min_per_step"],
-            sampling["presence_penalty"], sampling["count_penalty"], sampling["penalty_decay"],
+            self.model,
+            self.tok,
+            self.mask_id,
+            self.vocab_size,
+            prompt,
+            gen_len,
+            sampling["steps"],
+            sampling["block_size"],
+            sampling["temperature"],
+            sampling["top_k"],
+            sampling["top_p"],
+            sampling["decode_strategy"],
+            sampling["conf_threshold"],
+            sampling["min_per_step"],
+            sampling["presence_penalty"],
+            sampling["count_penalty"],
+            sampling["penalty_decay"],
             sampling["penalize_prompt"],
             verbose=False,
         )
 
     def _resolve_gen_len(self, req: ChatCompletionRequest) -> int:
         # OpenAI clients send either `max_tokens` (legacy) or
-        # `max_completion_tokens` (newer). Honor whichever is set, then
-        # clamp to the configured server cap.
-        raw = req.max_completion_tokens or req.max_tokens or self.max_tokens_cap
-        return max(1, min(int(raw), self.max_tokens_cap))
+        # `max_completion_tokens` (newer). Use whichever is set;
+        # fall back to ``max_tokens_default`` when neither is set
+        # (small default to avoid runaway generations from naive
+        # clients). Then clamp to the hard cap ``max_tokens_cap``
+        # to prevent abuse / OOM.
+        if req.max_completion_tokens is not None:
+            raw = int(req.max_completion_tokens)
+        elif req.max_tokens is not None:
+            raw = int(req.max_tokens)
+        else:
+            raw = self.max_tokens_default
+        return max(1, min(raw, self.max_tokens_cap))
 
     def _resolve_sampling(self, req: ChatCompletionRequest) -> dict[str, Any]:
         # DiffuRWKV-specific knobs come in via Pydantic's `model_extra`

@@ -25,16 +25,15 @@ import sys
 import lm_dataformat as lmd
 import numpy as np
 
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir))
-)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 import time
-import tqdm
+from threading import Semaphore
+
 import ftfy
+import indexed_dataset
+import tqdm
 
 from tokenizer import build_tokenizer
-import indexed_dataset
-from threading import Semaphore
 
 
 class Encoder(object):
@@ -97,9 +96,7 @@ def get_args():
         ],
         help="What type of tokenizer to use.",
     )
-    group.add_argument(
-        "--vocab-file", type=str, default=None, help="Path to the vocab file"
-    )
+    group.add_argument("--vocab-file", type=str, default=None, help="Path to the vocab file")
     group.add_argument(
         "--merge-file",
         type=str,
@@ -194,12 +191,8 @@ def main():
     output_idx_files = {}
     builders = {}
     for key in args.jsonl_keys:
-        output_bin_files[key] = "{}_{}_{}.bin".format(
-            args.output_prefix, key, "document"
-        )
-        output_idx_files[key] = "{}_{}_{}.idx".format(
-            args.output_prefix, key, "document"
-        )
+        output_bin_files[key] = "{}_{}_{}.bin".format(args.output_prefix, key, "document")
+        output_idx_files[key] = "{}_{}_{}.idx".format(args.output_prefix, key, "document")
         builders[key] = indexed_dataset.make_builder(
             output_bin_files[key],
             impl=args.dataset_impl,

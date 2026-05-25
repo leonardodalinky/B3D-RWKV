@@ -2,12 +2,19 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 
-import json, math, random, os, sys
+import json
+import math
+import os
+import random
+import sys
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 from pytorch_lightning.utilities import rank_zero_info
+from torch.utils.data import Dataset
+
 from .binidx import MMapIndexedDataset
+
 
 def is_prime(n):
     if n <= 1:
@@ -22,6 +29,7 @@ def is_prime(n):
             return False
         i += 6
     return True
+
 
 class MyDataset(Dataset):
     def __init__(self, args):
@@ -57,7 +65,9 @@ class MyDataset(Dataset):
             )
         else:
             self.lossable_buf = None
-            rank_zero_info(f"No .lossable.bin found at {lossable_path} -> all real tokens treated as lossable.")
+            rank_zero_info(
+                f"No .lossable.bin found at {lossable_path} -> all real tokens treated as lossable."
+            )
 
         self.samples_per_epoch = args.epoch_steps * args.real_bsz
         assert self.samples_per_epoch == 40320
@@ -80,7 +90,9 @@ class MyDataset(Dataset):
                 f"########## diffusion: {n_valid}/{len(sizes)} docs kept "
                 f"(0 < tokens <= {max_doc_tokens}); raw_len={raw_len} ##########"
             )
-            assert n_valid > 0, "no documents survived the length filter; relax --diff_max_doc_tokens"
+            assert (
+                n_valid > 0
+            ), "no documents survived the length filter; relax --diff_max_doc_tokens"
 
             slot_count = n_valid
         else:
@@ -92,9 +104,10 @@ class MyDataset(Dataset):
         # `slot_idx % len(valid_doc_indices)` wrap-around in __getitem__ to
         # double-sample the first (magic_prime - slot_count) docs per period,
         # silently breaking epoch semantics. Don't relax this.
-        assert args.magic_prime <= slot_count, \
-            f"magic_prime ({args.magic_prime}) > slot_count ({slot_count}); " \
+        assert args.magic_prime <= slot_count, (
+            f"magic_prime ({args.magic_prime}) > slot_count ({slot_count}); "
             f"recompute with find_magic_prime.py --data_size {slot_count} --ctx_len 1."
+        )
         # Lower bound used to be a hard floor at 0.9 to catch "you forgot to
         # rerun find_magic_prime after changing the dataset". Demoted to a
         # warning so deliberate subset training is allowed — when
@@ -115,10 +128,11 @@ class MyDataset(Dataset):
             )
         # PL needs each "epoch" (40320 samples) to fit inside magic_prime so
         # ii indices don't overflow. Hard-fail if you went way too small.
-        assert args.magic_prime >= self.samples_per_epoch, \
-            f"magic_prime ({args.magic_prime}) < samples_per_epoch " \
-            f"({self.samples_per_epoch}); one PL epoch wouldn't fit and " \
+        assert args.magic_prime >= self.samples_per_epoch, (
+            f"magic_prime ({args.magic_prime}) < samples_per_epoch "
+            f"({self.samples_per_epoch}); one PL epoch wouldn't fit and "
             f"epoch_count would be 0. Pick a bigger subset."
+        )
 
     def __len__(self):
         return self.args.epoch_steps * self.args.micro_bsz
@@ -184,8 +198,7 @@ class MyDataset(Dataset):
             p_full = float(getattr(args, "diff_full_mask_prob", 0.10))
             if p_full > 0.0:
                 full_mask_blk = torch.rand(n_blocks, 1) < p_full
-                r_per_block = torch.where(full_mask_blk,
-                                          torch.ones_like(r_per_block), r_per_block)
+                r_per_block = torch.where(full_mask_blk, torch.ones_like(r_per_block), r_per_block)
             mask_pos = torch.rand(n_blocks, block_size) < r_per_block
             mask_pos = mask_pos.view(raw_len)
             # Only allow mask sampling on lossable positions: User prompts, structural
@@ -207,7 +220,7 @@ class MyDataset(Dataset):
             # the supervision happens regardless. The y_view branch will
             # still produce target=0 because mask_blk is now True there.
             eos_id = 0
-            is_eos = (clean == eos_id)
+            is_eos = clean == eos_id
             if int(getattr(args, "diff_force_mask_eos", 1)) == 1:
                 mask_pos = mask_pos | is_eos
             # Force-mask the pads INSIDE the EOS-containing block only. Two

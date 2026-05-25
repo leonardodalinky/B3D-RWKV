@@ -1,0 +1,35 @@
+# Chat-API friendly RACE. Article + last problem only -- matches the
+# eval target of the stock `race` task (the earlier problems are
+# in-context priors, which we drop because chat APIs handle context
+# via fewshot turns, not inline).
+task: race_chat
+dataset_path: EleutherAI/race
+dataset_name: high
+output_type: generate_until
+test_split: test
+doc_to_text: !function preprocess_race_chat.doc_to_text
+doc_to_target: !function preprocess_race_chat.doc_to_target
+fewshot_delimiter: "\n\n"
+num_fewshot: 0
+generation_kwargs:
+  until:
+    - "\n\n"
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+filter_list:
+  # Single cascade filter: prefer "best answer is X", fall back to any
+  # isolated A-D. group_select=-1 picks the LAST match (the final-answer
+  # line, after reasoning). RegexFilter auto-picks the first non-empty
+  # capture group across the alternation.
+  - name: extract-letter
+    filter:
+      - function: regex
+        regex_pattern: 'best\s+answer\s+is[\s:]*\(?([A-D])|(?:^|[^A-Za-z])([A-D])(?:\)|\.|\s|$)'
+        group_select: -1
+      - function: take_first
+metadata:
+  version: 2.0

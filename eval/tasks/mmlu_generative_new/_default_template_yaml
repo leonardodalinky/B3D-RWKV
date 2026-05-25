@@ -1,0 +1,39 @@
+dataset_path: cais/mmlu
+test_split: test
+fewshot_split: dev
+fewshot_config:
+  sampler: first_n
+output_type: generate_until
+doc_to_text: "{{question.strip()}}\nA. {{choices[0]}}\nB. {{choices[1]}}\nC. {{choices[2]}}\nD. {{choices[3]}} (think a bit)"
+doc_to_target: "{{['A', 'B', 'C', 'D'][answer]}}"
+generation_kwargs:
+  until:
+    - "</s>"
+    - "\n\n"
+# All scoring is done by mmlu_utils.process_results on the raw response
+# (post-wrapper concat of reasoning_content + content). One passthrough
+# filter so process_results receives the full text; it then derives three
+# letter-match modes internally. See mmlu_utils.py for the regex specifics.
+filter_list:
+  - name: all-text
+    filter:
+      - function: take_first
+process_results: !function mmlu_utils.process_results
+metric_list:
+  # exact_match: response ENDS with the gold letter (strict / clean answer).
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+  # flexible_match: LAST standalone uppercase A/B/C/D equals gold (chat-style
+  # "B. ATP" or "...thus C." patterns).
+  - metric: flexible_match
+    aggregation: mean
+    higher_is_better: true
+  # loose_contains: gold letter appears ANYWHERE as a standalone A/B/C/D.
+  # Catches truncated-output / off-format cases where the model picked the
+  # right option somewhere inside the think span.
+  - metric: loose_contains
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 4.0

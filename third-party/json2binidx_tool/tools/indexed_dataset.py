@@ -23,8 +23,6 @@ import numpy as np
 import torch
 
 
-
-
 def __best_fitting_dtype(vocab_size=None):
     if vocab_size is not None and vocab_size < 65500:
         return np.uint16
@@ -52,9 +50,7 @@ def infer_dataset_impl(path):
 
 def make_builder(out_file, impl, vocab_size=None):
     if impl == "mmap":
-        return MMapIndexedDatasetBuilder(
-            out_file, dtype=__best_fitting_dtype(vocab_size)
-        )
+        return MMapIndexedDatasetBuilder(out_file, dtype=__best_fitting_dtype(vocab_size))
     else:
         return IndexedDatasetBuilder(out_file)
 
@@ -206,9 +202,7 @@ class IndexedDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def exists(path):
-        return os.path.exists(index_file_path(path)) and os.path.exists(
-            data_file_path(path)
-        )
+        return os.path.exists(index_file_path(path)) and os.path.exists(data_file_path(path))
 
     @property
     def supports_prefetch(self):
@@ -483,9 +477,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
             print("    warming up data mmap file...")
             _warmup_mmap_file(data_file_path(self._path))
         print("    creating numpy buffer of mmap...")
-        self._bin_buffer_mmap = np.memmap(
-            data_file_path(self._path), mode="r", order="C"
-        )
+        self._bin_buffer_mmap = np.memmap(data_file_path(self._path), mode="r", order="C")
         print("    creating memory view of numpy buffer...")
         self._bin_buffer = memoryview(self._bin_buffer_mmap)
 
@@ -554,9 +546,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def exists(path):
-        return os.path.exists(index_file_path(path)) and os.path.exists(
-            data_file_path(path)
-        )
+        return os.path.exists(index_file_path(path)) and os.path.exists(data_file_path(path))
 
 
 class MMapIndexedDatasetBuilder(object):

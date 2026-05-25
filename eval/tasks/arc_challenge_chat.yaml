@@ -1,0 +1,38 @@
+# Chat-API friendly arc_challenge. Override lm-eval's stock task (which uses
+# `gen_prefix` to prefill an assistant message -- not supported by
+# OpenAI-style chat APIs) with a free-form-then-regex-extract pattern.
+# Custom YAMLs override built-ins when --include_path is on its load list.
+task: arc_challenge_chat
+dataset_path: allenai/ai2_arc
+dataset_name: ARC-Challenge
+output_type: generate_until
+training_split: train
+validation_split: validation
+test_split: test
+fewshot_split: train
+doc_to_text: 'Given the following question and four candidate answers (A, B, C and D), choose the best answer.\nQuestion: {{question.strip()}}\nA. {{choices.text[0]}}\nB. {{choices.text[1]}}\nC. {{choices.text[2]}}{% if choices.text|length > 3 %}\nD. {{choices.text[3]}}{% endif %}\nYour response should end with "The best answer is [the_answer_letter]" where the_answer_letter is one of A, B, C, or D.'
+fewshot_delimiter: "\n\n"
+doc_to_target: "{{ 'ABCD'[answerKey|int - 1] if answerKey|string in '1234' else answerKey }}"
+num_fewshot: 0
+generation_kwargs:
+  until:
+    - "\n\n"
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+filter_list:
+  # Single cascade filter: prefer "best answer is X", fall back to any
+  # isolated A-D. group_select=-1 picks the LAST match (which is usually
+  # the model's final-answer line, after reasoning). RegexFilter auto-picks
+  # the first non-empty capture group across the alternation.
+  - name: extract-letter
+    filter:
+      - function: regex
+        regex_pattern: 'best\s+answer\s+is[\s:]*\(?([A-D])|(?:^|[^A-Za-z])([A-D])(?:\)|\.|\s|$)'
+        group_select: -1
+      - function: take_first
+metadata:
+  version: 2.0

@@ -13,15 +13,6 @@ VOCAB="$REPO_ROOT/tokenizer/rwkv_vocab_v20230424.txt"  # bundled, single source 
 
 mkdir -p "$DATA_DIR"
 
-echo "[1/2] HF -> JSONL: $JSONL_PATH"
+echo "HF -> JSONL: $JSONL_PATH"
 uv run --group data python "$HERE/convert_tulu3_to_jsonl.py" \
     --output "$JSONL_PATH" "$@"
-
-echo "[2/2] JSONL -> binidx (+ lossable.bin) at prefix $BINIDX_PREFIX"
-uv run --group data python "$HERE/preprocess_segments.py" \
-    --input "$JSONL_PATH" \
-    --output-prefix "$BINIDX_PREFIX" \
-    --vocab "$VOCAB" \
-    --append-eod
-
-echo "done. Train with --data_file ${BINIDX_PREFIX}_text_document --vocab_size 65536 (diffusion mode reuses id 65535 as MASK)"

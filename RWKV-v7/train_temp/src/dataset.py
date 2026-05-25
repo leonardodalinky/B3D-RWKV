@@ -2,12 +2,19 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 
-import json, math, random, os, sys
+import json
+import math
+import os
+import random
+import sys
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 from pytorch_lightning.utilities import rank_zero_info
+from torch.utils.data import Dataset
+
 from .binidx import MMapIndexedDataset
+
 
 def is_prime(n):
     if n <= 1:
@@ -22,6 +29,7 @@ def is_prime(n):
             return False
         i += 6
     return True
+
 
 class MyDataset(Dataset):
     def __init__(self, args):

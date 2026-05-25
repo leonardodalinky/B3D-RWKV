@@ -7,6 +7,7 @@ DiffuRWKV-specific knobs (`top_k`, `conf_threshold`, `decode_strategy`,
 `min_per_step`, `penalty_decay`, `penalize_prompt`) without us hardcoding
 them in the schema; the engine reads them from `model_extra` with defaults.
 """
+
 from __future__ import annotations
 
 import time
@@ -37,10 +38,10 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage]
 
     # OpenAI sampling
-    temperature: float = 0.8
-    top_p: float = 0.9
+    temperature: float = 1.0
+    top_p: float = 0.7
     presence_penalty: float = 0.0
-    frequency_penalty: float = 0.0   # mapped to DiffuRWKV count_penalty
+    frequency_penalty: float = 0.0  # mapped to DiffuRWKV count_penalty
 
     # OpenAI length / batch / streaming
     max_tokens: int | None = None

@@ -31,7 +31,9 @@ POLL_INTERVAL = 5.0
 # rwkv-N.pth (so auto-detect grabs it for --load_model) but no -resume.ckpt
 # (so DeepSpeed doesn't spend minutes loading sharded optim state).
 BENCH_PROJ_DIR = "/tmp/bench_proj_dir_DELETE_ME"
-SOURCE_PTH = "/data/rsync/RWKV/DiffuRWKV/train/out/diff-L32-D4096-x070-blk32-ctx6144_fixEOF/rwkv-19.pth"
+SOURCE_PTH = (
+    "/data/rsync/RWKV/DiffuRWKV/train/out/diff-L32-D4096-x070-blk32-ctx6144_fixEOF/rwkv-19.pth"
+)
 
 
 def _prep_proj_dir():
@@ -130,9 +132,13 @@ def run_one_config(name: str, env_overrides: dict) -> dict:
     # New process group so we can kill the whole tree (python + 8 ddp workers)
     proc = subprocess.Popen(
         ["bash", str(SCRIPT)],
-        cwd=REPO, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid, text=True, bufsize=1,
+        cwd=REPO,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        preexec_fn=os.setsid,
+        text=True,
+        bufsize=1,
     )
 
     sstep_samples: list[float] = []
@@ -178,9 +184,11 @@ def run_one_config(name: str, env_overrides: dict) -> dict:
                         util_samples.append(sum(cu) / len(cu))  # avg across GPUs
                         if sstep_samples:
                             elapsed = now - start
-                            print(f"  t={elapsed:5.0f}s  peak_mem={peak_mem/1024:.1f}GB  "
-                                  f"util={cu}  s/step samples={len(sstep_samples)}",
-                                  flush=True)
+                            print(
+                                f"  t={elapsed:5.0f}s  peak_mem={peak_mem/1024:.1f}GB  "
+                                f"util={cu}  s/step samples={len(sstep_samples)}",
+                                flush=True,
+                            )
                     except Exception as e:
                         print(f"  warn: nvidia-smi failed: {e}")
 
@@ -232,21 +240,21 @@ CONFIGS = [
     # so it can fit larger micro_bsz) and grad accumulation (amortize CPU-Adam).
     #
     # ---- stage_2_offload anchors (probe practical max B) ----
-    ("a_s2o_b16_a1",   dict(M_BSZ=16, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=1)),
-    ("b_s2o_b48_a1",   dict(M_BSZ=48, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=1)),
-    ("c_s2o_b63_a1",   dict(M_BSZ=63, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=1)),
+    ("a_s2o_b16_a1", dict(M_BSZ=16, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=1)),
+    ("b_s2o_b48_a1", dict(M_BSZ=48, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=1)),
+    ("c_s2o_b63_a1", dict(M_BSZ=63, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=1)),
     # ---- stage_2_offload + grad_accum: amortize CPU-Adam fixed overhead ----
     # Same effective batch as B=63 but each accum step does less compute,
     # exposing whether CPU-Adam is dominant.
-    ("d_s2o_b16_a4",   dict(M_BSZ=16, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=4)),
-    ("e_s2o_b48_a4",   dict(M_BSZ=48, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=4)),
+    ("d_s2o_b16_a4", dict(M_BSZ=16, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=4)),
+    ("e_s2o_b48_a4", dict(M_BSZ=48, STRATEGY="deepspeed_stage_2_offload", GRAD_CP=1, ACC_GRAD=4)),
     # ---- stage_3 + offload: weights also sharded, frees ~12GB/GPU ----
     # Should let M_BSZ go higher than stage_2_offload's ceiling.
-    ("f_s3o_b63_a1",   dict(M_BSZ=63, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=1)),
-    ("g_s3o_b80_a1",   dict(M_BSZ=80, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=1)),
-    ("h_s3o_b112_a1",  dict(M_BSZ=112,STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=1)),
+    ("f_s3o_b63_a1", dict(M_BSZ=63, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=1)),
+    ("g_s3o_b80_a1", dict(M_BSZ=80, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=1)),
+    ("h_s3o_b112_a1", dict(M_BSZ=112, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=1)),
     # ---- stage_3 + offload + grad_accum (the throughput-king candidate) ----
-    ("i_s3o_b80_a4",   dict(M_BSZ=80, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=4)),
+    ("i_s3o_b80_a4", dict(M_BSZ=80, STRATEGY="deepspeed_stage_3_offload", GRAD_CP=1, ACC_GRAD=4)),
 ]
 
 
@@ -257,15 +265,21 @@ def main():
     skip_offload_above = None  # if offload OOMs at B=X, skip larger offload configs too
     for name, env in CONFIGS:
         b_now = int(env.get("M_BSZ", 0))
-        if skip_offload_above is not None and \
-           env.get("STRATEGY") == "deepspeed_stage_2_offload" and \
-           b_now >= skip_offload_above:
+        if (
+            skip_offload_above is not None
+            and env.get("STRATEGY") == "deepspeed_stage_2_offload"
+            and b_now >= skip_offload_above
+        ):
             print(f"\n[skip] {name}: M_BSZ={b_now} >= known-OOM offload {skip_offload_above}")
             continue
-        if skip_remaining_no_offload_above is not None and \
-           env.get("STRATEGY") == "deepspeed_stage_2" and \
-           b_now >= skip_remaining_no_offload_above:
-            print(f"\n[skip] {name}: M_BSZ={b_now} >= known-OOM no-offload {skip_remaining_no_offload_above}")
+        if (
+            skip_remaining_no_offload_above is not None
+            and env.get("STRATEGY") == "deepspeed_stage_2"
+            and b_now >= skip_remaining_no_offload_above
+        ):
+            print(
+                f"\n[skip] {name}: M_BSZ={b_now} >= known-OOM no-offload {skip_remaining_no_offload_above}"
+            )
             continue
         try:
             r = run_one_config(name, env)
@@ -277,25 +291,33 @@ def main():
             if env.get("STRATEGY") == "deepspeed_stage_2_offload":
                 skip_offload_above = min(skip_offload_above or b_now, b_now)
             else:
-                skip_remaining_no_offload_above = min(skip_remaining_no_offload_above or b_now, b_now)
+                skip_remaining_no_offload_above = min(
+                    skip_remaining_no_offload_above or b_now, b_now
+                )
 
     print("\n\n" + "=" * 90)
     print("SUMMARY")
     print("=" * 90)
-    print(f"{'name':<28}  {'OOM':>4}  {'samples':>8}  {'s/step':>8}  {'Kt/s':>8}  {'peak GB':>8}  {'util%':>6}")
+    print(
+        f"{'name':<28}  {'OOM':>4}  {'samples':>8}  {'s/step':>8}  {'Kt/s':>8}  {'peak GB':>8}  {'util%':>6}"
+    )
     for r in results:
         oom = "YES" if r["oom"] else "no"
-        print(f"{r['name']:<28}  {oom:>4}  {r['n_samples']:>8}  "
-              f"{r['avg_sstep']:>8.3f}  {r['avg_kts']:>8.1f}  "
-              f"{r['peak_mem_gb']:>8.1f}  {r['peak_util_pct']:>6}")
+        print(
+            f"{r['name']:<28}  {oom:>4}  {r['n_samples']:>8}  "
+            f"{r['avg_sstep']:>8.3f}  {r['avg_kts']:>8.1f}  "
+            f"{r['peak_mem_gb']:>8.1f}  {r['peak_util_pct']:>6}"
+        )
     print("=" * 90)
 
     # Print recommendation
     valid = [r for r in results if not r["oom"] and r["n_samples"] > 0]
     if valid:
         best = min(valid, key=lambda r: r["avg_sstep"])
-        print(f"\nBEST throughput: {best['name']} → {best['avg_sstep']:.3f}s/step, "
-              f"{best['avg_kts']:.1f} Kt/s, peak {best['peak_mem_gb']:.1f}GB")
+        print(
+            f"\nBEST throughput: {best['name']} → {best['avg_sstep']:.3f}s/step, "
+            f"{best['avg_kts']:.1f} Kt/s, peak {best['peak_mem_gb']:.1f}GB"
+        )
         print(f"  env: {best['env']}")
 
 

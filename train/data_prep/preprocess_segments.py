@@ -21,6 +21,7 @@ Usage:
         --input merged.jsonl --output-prefix /path/combined \\
         [--append-eod] [--vocab tokenizer/rwkv_vocab_v20230424.txt]
 """
+
 import argparse
 import json
 import os
@@ -36,7 +37,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from tokenizer import RWKVTokenizer  # noqa: E402
 
-
 # Mirror train/src/binidx.py so MyDataset.MMapIndexedDataset can mmap our output.
 _HDR_MAGIC = b"MMIDIDX\x00\x00"
 # json2binidx dtype codes; we always emit int32 (code 4) for parity with the
@@ -51,19 +51,19 @@ def write_idx(path: str, sizes: list, doc_idx: list):
     """Write a .idx that MMapIndexedDataset.Index can read."""
     with open(path, "wb") as f:
         f.write(_HDR_MAGIC)
-        f.write(struct.pack("<Q", 1))           # version
-        f.write(struct.pack("<B", _DTYPE_CODE)) # dtype code
+        f.write(struct.pack("<Q", 1))  # version
+        f.write(struct.pack("<B", _DTYPE_CODE))  # dtype code
         f.write(struct.pack("<Q", len(sizes)))  # n_docs
-        f.write(struct.pack("<Q", len(doc_idx)))# _doc_count
+        f.write(struct.pack("<Q", len(doc_idx)))  # _doc_count
         # pointers: byte offset of doc i within the .bin
         pointers = []
         addr = 0
         for sz in sizes:
             pointers.append(addr)
             addr += int(sz) * _DTYPE_SIZE
-        np.array(sizes,    dtype=np.int32).tofile(f)
+        np.array(sizes, dtype=np.int32).tofile(f)
         np.array(pointers, dtype=np.int64).tofile(f)
-        np.array(doc_idx,  dtype=np.int64).tofile(f)
+        np.array(doc_idx, dtype=np.int64).tofile(f)
 
 
 def iter_jsonl_lines(path: str):
@@ -111,19 +111,30 @@ def row_to_token_streams(row, tokenizer, append_eod: bool):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="input JSONL (segment-format or legacy text-only)")
-    ap.add_argument("--output-prefix", required=True,
-                    help="output prefix; produces <prefix>_text_document.{bin,idx,lossable.bin}")
-    ap.add_argument("--vocab", default=None,
-                    help="path to rwkv_vocab_v20230424.txt; defaults to bundled tokenizer/")
-    ap.add_argument("--append-eod", action="store_true",
-                    help="append id 0 (EOS, non-lossable) at the end of every document")
+    ap.add_argument(
+        "--input", required=True, help="input JSONL (segment-format or legacy text-only)"
+    )
+    ap.add_argument(
+        "--output-prefix",
+        required=True,
+        help="output prefix; produces <prefix>_text_document.{bin,idx,lossable.bin}",
+    )
+    ap.add_argument(
+        "--vocab",
+        default=None,
+        help="path to rwkv_vocab_v20230424.txt; defaults to bundled tokenizer/",
+    )
+    ap.add_argument(
+        "--append-eod",
+        action="store_true",
+        help="append id 0 (EOS, non-lossable) at the end of every document",
+    )
     ap.add_argument("--log-every", type=int, default=10000)
     args = ap.parse_args()
 
     out_prefix = args.output_prefix + "_text_document"
-    bin_path      = out_prefix + ".bin"
-    idx_path      = out_prefix + ".idx"
+    bin_path = out_prefix + ".bin"
+    idx_path = out_prefix + ".idx"
     lossable_path = out_prefix + ".lossable.bin"
 
     os.makedirs(os.path.dirname(out_prefix) or ".", exist_ok=True)
@@ -139,15 +150,17 @@ def main():
             tokens, lossable = row_to_token_streams(row, tokenizer, args.append_eod)
             if not tokens:
                 continue
-            np.asarray(tokens,   dtype=_DTYPE).tofile(fbin)
+            np.asarray(tokens, dtype=_DTYPE).tofile(fbin)
             np.asarray(lossable, dtype=np.uint8).tofile(floss)
             sizes.append(len(tokens))
-            n_total_tokens   += len(tokens)
+            n_total_tokens += len(tokens)
             n_lossable_tokens += sum(lossable)
             n_docs += 1
             if n_docs % args.log_every == 0:
-                print(f"  ... {n_docs:,} docs, {n_total_tokens:,} tokens "
-                      f"({100 * n_lossable_tokens / max(n_total_tokens, 1):.1f}% lossable)")
+                print(
+                    f"  ... {n_docs:,} docs, {n_total_tokens:,} tokens "
+                    f"({100 * n_lossable_tokens / max(n_total_tokens, 1):.1f}% lossable)"
+                )
 
     # json2binidx writes doc_idx = list(range(n_docs + 1)) for "single-document"
     # mode (one entry per doc + a sentinel). We mirror that.
@@ -157,7 +170,9 @@ def main():
     print()
     print(f"docs            = {n_docs:,}")
     print(f"tokens          = {n_total_tokens:,}")
-    print(f"lossable tokens = {n_lossable_tokens:,}  ({100 * n_lossable_tokens / max(n_total_tokens, 1):.2f}%)")
+    print(
+        f"lossable tokens = {n_lossable_tokens:,}  ({100 * n_lossable_tokens / max(n_total_tokens, 1):.2f}%)"
+    )
     print(f"-> {bin_path}")
     print(f"-> {idx_path}")
     print(f"-> {lossable_path}")

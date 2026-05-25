@@ -11,6 +11,7 @@ The two underlying classes are also exposed for advanced use:
 
     from tokenizer import TRIE_TOKENIZER, RWKV_TOKENIZER
 """
+
 from pathlib import Path
 
 from .rwkv_tokenizer import RWKV_TOKENIZER, TRIE_TOKENIZER

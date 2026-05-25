@@ -30,6 +30,7 @@ Usage:
       --block_size 128 --gen_len 256 --steps 16 \
       --prompt "User: explain RWKV in two sentences.\n\nAssistant:"
 """
+
 import argparse
 import math
 import os
@@ -47,7 +48,11 @@ from tokenizer import RWKVTokenizer  # noqa: E402
 
 def build_model(ckpt: str, args_for_model):
     os.environ["RWKV_HEAD_L2WRAP_CE_CHUNK"] = "0"
-    os.environ["RWKV_JIT_ON"] = "1"
+    # JIT off in inference: the training-side @torch.jit.script_method
+    # decorators in src.model resolve `tmix_*_bf16_v5` etc. at class
+    # def time, which would fail when RWKV_INFERENCE_ONLY=1 hides those
+    # symbols. Plain Python class defs just bind names lazily.
+    os.environ["RWKV_JIT_ON"] = "0"
     # The wkv7s state kernel now lives at infer/cuda/wkv7s.{cu,op.cpp} and is
     # loaded by model.py via an absolute path (so its location is independent
     # of cwd). The typedef in wkv7s.cu is bf16, matching training exactly.
@@ -55,6 +60,11 @@ def build_model(ckpt: str, args_for_model):
     os.environ["RWKV_MY_TESTING"] = args_for_model.my_testing
     os.environ["RWKV_CTXLEN"] = str(args_for_model.ctx_len)
     os.environ["RWKV_HEAD_SIZE"] = str(args_for_model.head_size)
+    # Skip compiling all training-only CUDA kernels (clampw, autograd-aware
+    # tmix/cmix, L2-wrap CE) — `model.py` gates them behind this env var.
+    # Inference uses only the small infer/cuda/ kernels, so a cold import
+    # drops from 5-10 min to ~30 s.
+    os.environ["RWKV_INFERENCE_ONLY"] = "1"
 
     # model.py still JIT-loads training kernels under train/cuda/ with
     # relative "cuda/..." paths, so we cwd into train/ before importing it.
@@ -79,11 +89,15 @@ def build_model(ckpt: str, args_for_model):
         head = model.head.weight
         mask_id = args_for_model.vocab_size - 1
         print(f"[DBG] ckpt           = {ckpt}")
-        print(f"[DBG] emb.weight     dtype={emb.dtype} shape={tuple(emb.shape)} "
-              f"abs_mean={emb.float().abs().mean().item():.4f} "
-              f"max={emb.float().abs().max().item():.4f}")
-        print(f"[DBG] head.weight    dtype={head.dtype} shape={tuple(head.shape)} "
-              f"abs_mean={head.float().abs().mean().item():.4f}")
+        print(
+            f"[DBG] emb.weight     dtype={emb.dtype} shape={tuple(emb.shape)} "
+            f"abs_mean={emb.float().abs().mean().item():.4f} "
+            f"max={emb.float().abs().max().item():.4f}"
+        )
+        print(
+            f"[DBG] head.weight    dtype={head.dtype} shape={tuple(head.shape)} "
+            f"abs_mean={head.float().abs().mean().item():.4f}"
+        )
         print(f"[DBG] emb[MASK={mask_id}] abs_mean={emb[mask_id].float().abs().mean().item():.4f}")
         print(f"[DBG] emb[EOS=0]      abs_mean={emb[0].float().abs().mean().item():.4f}")
         print(f"[DBG] head[EOS=0]     abs_mean={head[0].float().abs().mean().item():.4f}")
@@ -91,8 +105,10 @@ def build_model(ckpt: str, args_for_model):
         b0 = model.blocks[0].att
         print(f"[DBG] blocks.0.att.w0 abs_mean={b0.w0.float().abs().mean().item():.4f}")
         print(f"[DBG] blocks.0.att.w1 abs_mean={b0.w1.float().abs().mean().item():.4f}")
-        print(f"[DBG] blocks.0.att.receptance.weight abs_mean="
-              f"{b0.receptance.weight.float().abs().mean().item():.4f}")
+        print(
+            f"[DBG] blocks.0.att.receptance.weight abs_mean="
+            f"{b0.receptance.weight.float().abs().mean().item():.4f}"
+        )
     # ---- end DEBUG ----
     return model
 
@@ -145,9 +161,7 @@ class GraphStepRunner:
 
         # Static input: filled with MASK initially; the caller's `step`
         # updates the two halves (b1 and b2) before each replay.
-        self.static_inp = torch.full(
-            (2 * block_size,), mask_id, dtype=torch.long, device="cuda"
-        )
+        self.static_inp = torch.full((2 * block_size,), mask_id, dtype=torch.long, device="cuda")
 
         # Source ctx state — caller writes this once per block via
         # set_ctx_state; the graph reads it on every replay.
@@ -186,7 +200,8 @@ class GraphStepRunner:
                 for dst, src in zip(self.static_working_state, self.static_ctx_state):
                     dst.copy_(src)
                 logits, _ = self.model.forward_fast(
-                    self.static_inp, self.static_working_state,
+                    self.static_inp,
+                    self.static_working_state,
                     full_output=True,
                 )
             self.static_logits = torch.empty_like(logits)
@@ -201,7 +216,8 @@ class GraphStepRunner:
             for dst, src in zip(self.static_working_state, self.static_ctx_state):
                 dst.copy_(src)
             logits, _ = self.model.forward_fast(
-                self.static_inp, self.static_working_state,
+                self.static_inp,
+                self.static_working_state,
                 full_output=True,
             )
             self.static_logits.copy_(logits)
@@ -283,15 +299,22 @@ def _safe_decode(tok, ids: list[int]) -> str:
 
 
 @torch.no_grad()
-def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
-                       steps: int, temperature: float, top_k: int,
-                       top_p: float = 1.0,
-                       penalty: torch.Tensor | None = None,
-                       strategy: str = "threshold",
-                       conf_threshold: float = 0.95,
-                       min_per_step: int = 0,
-                       graph_runner: "GraphStepRunner | None" = None,
-                       verbose: bool = False) -> torch.Tensor:
+def denoise_block_fast(
+    model,
+    ctx_state,
+    block_size: int,
+    mask_id: int,
+    steps: int,
+    temperature: float,
+    top_k: int,
+    top_p: float = 1.0,
+    penalty: torch.Tensor | None = None,
+    strategy: str = "threshold",
+    conf_threshold: float = 0.95,
+    min_per_step: int = 0,
+    graph_runner: "GraphStepRunner | None" = None,
+    verbose: bool = False,
+) -> torch.Tensor:
     """Iterative denoising of one block, starting from ``ctx_state`` (not mutated).
 
     Two commit strategies:
@@ -346,7 +369,7 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
             step_state = _clone_state(ctx_state)
             inp = torch.cat([cur, cur], dim=0)
             logits, _ = model.forward_fast(inp, step_state, full_output=True)
-        b2_logits = logits[block_size:].float()         # [B, V]
+        b2_logits = logits[block_size:].float()  # [B, V]
         # Always suppress PAD (65534) and MASK (65535): these are training-only
         # tokens and there's no valid byte-level decoding for them. The model
         # now learns to predict PAD after EOS (because b3 carries pad in
@@ -364,17 +387,23 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
         if verbose and t == 1 and not getattr(denoise_block_fast, "_dbg_done", False):
             denoise_block_fast._dbg_done = True
             full_lg = logits.float()
-            print(f"[DBG] full logits: shape={tuple(full_lg.shape)} "
-                  f"min={full_lg.min().item():.3f} max={full_lg.max().item():.3f} "
-                  f"mean={full_lg.mean().item():.3f} "
-                  f"finite={bool(torch.isfinite(full_lg).all())}")
-            print(f"[DBG] b2 logits:   shape={tuple(b2_logits.shape)} "
-                  f"min={b2_logits.min().item():.3f} max={b2_logits.max().item():.3f}")
+            print(
+                f"[DBG] full logits: shape={tuple(full_lg.shape)} "
+                f"min={full_lg.min().item():.3f} max={full_lg.max().item():.3f} "
+                f"mean={full_lg.mean().item():.3f} "
+                f"finite={bool(torch.isfinite(full_lg).all())}"
+            )
+            print(
+                f"[DBG] b2 logits:   shape={tuple(b2_logits.shape)} "
+                f"min={b2_logits.min().item():.3f} max={b2_logits.max().item():.3f}"
+            )
             top5_vals, top5_idx = b2_logits[0].topk(5)
             print(f"[DBG] b2[pos=0] top5 ids:  {top5_idx.tolist()}")
             print(f"[DBG] b2[pos=0] top5 vals: {[round(v, 3) for v in top5_vals.tolist()]}")
-            print(f"[DBG] b2[pos=0] logit[0]={b2_logits[0, 0].item():.3f} "
-                  f"logit[mask_id={mask_id}]={b2_logits[0, mask_id].item():.3f}")
+            print(
+                f"[DBG] b2[pos=0] logit[0]={b2_logits[0, 0].item():.3f} "
+                f"logit[mask_id={mask_id}]={b2_logits[0, mask_id].item():.3f}"
+            )
             # Also check b1 (first half) - should be similar to b2 in magnitude
             b1_logits = logits[:block_size].float()
             b1_top5_vals, b1_top5_idx = b1_logits[0].topk(5)
@@ -459,16 +488,22 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
             if verbose:
                 n_pred_eos = int((pred == 0).sum().item())
                 n_pred_mask = int((pred == mask_id).sum().item())
-                print(f"[DBG step {t}] strategy={strategy} commits={idx.numel()}  "
-                      f"#pred==0: {n_pred_eos}/{block_size}  "
-                      f"#pred==MASK: {n_pred_mask}/{block_size}")
-                print(f"[DBG step {t}] commit idx={sorted(idx.tolist())[:8]}...  "
-                      f"  vals={pred[idx].tolist()[:8]}")
+                print(
+                    f"[DBG step {t}] strategy={strategy} commits={idx.numel()}  "
+                    f"#pred==0: {n_pred_eos}/{block_size}  "
+                    f"#pred==MASK: {n_pred_mask}/{block_size}"
+                )
+                print(
+                    f"[DBG step {t}] commit idx={sorted(idx.tolist())[:8]}...  "
+                    f"  vals={pred[idx].tolist()[:8]}"
+                )
             cur[idx] = pred[idx]
             is_masked[idx] = False
             if verbose:
-                print(f"[DBG step {t}] cur[:8]={cur[:8].tolist()}  "
-                      f"is_masked.sum()={int(is_masked.sum().item())}")
+                print(
+                    f"[DBG step {t}] cur[:8]={cur[:8].tolist()}  "
+                    f"is_masked.sum()={int(is_masked.sum().item())}"
+                )
 
     # Final cleanup: any still-masked position -> argmax from the last step's logits.
     if is_masked.any():
@@ -476,13 +511,27 @@ def denoise_block_fast(model, ctx_state, block_size: int, mask_id: int,
     return cur
 
 
-def run_one(model, tok, mask_id: int, vocab_size: int,
-            prompt_text: str, gen_len: int, steps: int, block_size: int,
-            temperature: float, top_k: int, top_p: float,
-            strategy: str, conf_threshold: float, min_per_step: int,
-            presence_penalty: float, count_penalty: float, penalty_decay: float,
-            penalize_prompt: bool,
-            verbose: bool = False) -> tuple[str, str, int]:
+def run_one(
+    model,
+    tok,
+    mask_id: int,
+    vocab_size: int,
+    prompt_text: str,
+    gen_len: int,
+    steps: int,
+    block_size: int,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    strategy: str,
+    conf_threshold: float,
+    min_per_step: int,
+    presence_penalty: float,
+    count_penalty: float,
+    penalty_decay: float,
+    penalize_prompt: bool,
+    verbose: bool = False,
+) -> tuple[str, str, int]:
     """Run one generation with a pre-loaded model and tokenizer.
 
     Returns ``(text, finish_reason, n_completion_tokens)`` where ``finish_reason``
@@ -518,7 +567,7 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
 
     committed: list[torch.Tensor] = []
     n_blocks = math.ceil(gen_len / block_size)
-    eos_id = 0    # RWKV-world tokenizer's EOS
+    eos_id = 0  # RWKV-world tokenizer's EOS
     eos_pos_in_concat = None
 
     # CUDA Graph path: capture forward_fast once and replay it for every
@@ -533,14 +582,12 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
     graph_runner = None
     if os.environ.get("DIFF_DISABLE_CUDA_GRAPH", "0") != "1":
         if verbose:
-            print("[graph] capturing CUDA graph for forward_fast (one-time)...",
-                  flush=True)
+            print("[graph] capturing CUDA graph for forward_fast (one-time)...", flush=True)
         t0 = time.time() if verbose else None
         graph_runner = GraphStepRunner(model, block_size, mask_id)
         graph_runner.warmup_and_capture(n_warmup=3)
         if verbose:
-            print(f"[graph] capture done in {time.time() - t0:.1f}s",
-                  flush=True)
+            print(f"[graph] capture done in {time.time() - t0:.1f}s", flush=True)
 
     for bi in range(n_blocks):
         # Build the per-vocab penalty tensor for this block from current
@@ -552,19 +599,25 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
         penalty = None
         if use_penalty:
             penalty = (
-                presence_penalty * (token_count > 0).to(torch.float32)
-                + count_penalty * token_count
+                presence_penalty * (token_count > 0).to(torch.float32) + count_penalty * token_count
             )
 
-        blk = denoise_block_fast(model, ctx_state, block_size, mask_id,
-                                 steps, temperature, top_k,
-                                 top_p=top_p,
-                                 penalty=penalty,
-                                 strategy=strategy,
-                                 conf_threshold=conf_threshold,
-                                 min_per_step=min_per_step,
-                                 graph_runner=graph_runner,
-                                 verbose=verbose)
+        blk = denoise_block_fast(
+            model,
+            ctx_state,
+            block_size,
+            mask_id,
+            steps,
+            temperature,
+            top_k,
+            top_p=top_p,
+            penalty=penalty,
+            strategy=strategy,
+            conf_threshold=conf_threshold,
+            min_per_step=min_per_step,
+            graph_runner=graph_runner,
+            verbose=verbose,
+        )
         committed.append(blk)
         _, ctx_state = model.forward_fast(blk, ctx_state, full_output=False)
 
@@ -576,9 +629,7 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
         if use_penalty:
             if penalty_decay != 1.0:
                 token_count.mul_(penalty_decay)
-            token_count.scatter_add_(
-                0, blk.long(), torch.ones_like(blk, dtype=torch.float32)
-            )
+            token_count.scatter_add_(0, blk.long(), torch.ones_like(blk, dtype=torch.float32))
 
         # Diffusion-style early stop: if the model emitted EOS anywhere in
         # this block, treat that as end-of-turn. The block's positions
@@ -596,7 +647,7 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
             # progress print (which is also what causes mid-utf8 decode errs).
             partial_ids = torch.cat(committed).tolist()
             if eos_pos_in_concat is not None:
-                partial_ids = partial_ids[: eos_pos_in_concat]
+                partial_ids = partial_ids[:eos_pos_in_concat]
             partial = _safe_decode(tok, partial_ids)
             print(f"--- after block {bi+1}/{n_blocks} ---")
             print(partial)
@@ -608,10 +659,10 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
 
     all_out = torch.cat(committed)
     if eos_pos_in_concat is not None:
-        out_ids = all_out[: eos_pos_in_concat].tolist()
+        out_ids = all_out[:eos_pos_in_concat].tolist()
         finish_reason = "stop"
     else:
-        out_ids = all_out[: gen_len].tolist()
+        out_ids = all_out[:gen_len].tolist()
         finish_reason = "length"
     text = _safe_decode(tok, out_ids)
     if verbose:
@@ -623,41 +674,75 @@ def run_one(model, tok, mask_id: int, vocab_size: int,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--vocab", default=None,
-                    help="path to rwkv_vocab_v20230424.txt; default uses the bundled tokenizer/")
+    ap.add_argument(
+        "--vocab",
+        default=None,
+        help="path to rwkv_vocab_v20230424.txt; default uses the bundled tokenizer/",
+    )
     ap.add_argument("--prompt", default="")
     ap.add_argument("--gen_len", type=int, default=256)
     ap.add_argument("--block_size", type=int, default=128)
     ap.add_argument("--steps", type=int, default=16)
     ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--top_k", type=int, default=0,
-                    help="keep only the K highest-prob tokens per position; 0 = no cap")
-    ap.add_argument("--top_p", type=float, default=1.0,
-                    help="nucleus sampling: keep smallest token set whose cum prob > top_p; 1.0 = off")
+    ap.add_argument(
+        "--top_k",
+        type=int,
+        default=0,
+        help="keep only the K highest-prob tokens per position; 0 = no cap",
+    )
+    ap.add_argument(
+        "--top_p",
+        type=float,
+        default=1.0,
+        help="nucleus sampling: keep smallest token set whose cum prob > top_p; 1.0 = off",
+    )
     # ChatRWKV / RWKV-Gradio canonical penalties. Same semantics, same names.
     # See: https://github.com/BlinkDL/ChatRWKV/blob/.../rwkv_pip_package/src/rwkv/utils.py
     #   logit[v] -= presence_penalty * 1[count[v] > 0] + count_penalty * count[v]
     # After each step, count *= penalty_decay; then count[just_emitted] += 1.
     # We apply this between blocks (not between intra-block denoise steps) since
     # diffusion commits all B positions in parallel from the same conditioning.
-    ap.add_argument("--presence_penalty", type=float, default=0.0,
-                    help="subtract this from any logit whose token has appeared in history at all")
-    ap.add_argument("--count_penalty", type=float, default=0.0,
-                    help="subtract this * count(token) from its logit (compounds with repetition)")
-    ap.add_argument("--penalty_decay", type=float, default=0.996,
-                    help="multiply running token-count by this after each block; <1 lets old "
-                         "penalties fade so the model can revisit topics later")
-    ap.add_argument("--penalize_prompt", action="store_true",
-                    help="seed the token-count with the prompt's tokens (default off: only "
-                         "tokens the sampler emits contribute to the penalty)")
+    ap.add_argument(
+        "--presence_penalty",
+        type=float,
+        default=0.0,
+        help="subtract this from any logit whose token has appeared in history at all",
+    )
+    ap.add_argument(
+        "--count_penalty",
+        type=float,
+        default=0.0,
+        help="subtract this * count(token) from its logit (compounds with repetition)",
+    )
+    ap.add_argument(
+        "--penalty_decay",
+        type=float,
+        default=0.996,
+        help="multiply running token-count by this after each block; <1 lets old "
+        "penalties fade so the model can revisit topics later",
+    )
+    ap.add_argument(
+        "--penalize_prompt",
+        action="store_true",
+        help="seed the token-count with the prompt's tokens (default off: only "
+        "tokens the sampler emits contribute to the penalty)",
+    )
     # LLaDA-2.0 style decoding: threshold + low-confidence fallback. ``linear``
     # keeps the old fixed-pace schedule (commit floor(B*t/T) per step).
     ap.add_argument("--decode_strategy", choices=["threshold", "linear"], default="threshold")
-    ap.add_argument("--conf_threshold", type=float, default=0.95,
-                    help="(threshold) commit any masked position whose token prob > this in one shot")
-    ap.add_argument("--min_per_step", type=int, default=0,
-                    help="(threshold) fallback floor: if Phase-1 commits < this, take the top-N most-confident "
-                         "instead. 0 -> auto = max(1, block_size // steps)")
+    ap.add_argument(
+        "--conf_threshold",
+        type=float,
+        default=0.95,
+        help="(threshold) commit any masked position whose token prob > this in one shot",
+    )
+    ap.add_argument(
+        "--min_per_step",
+        type=int,
+        default=0,
+        help="(threshold) fallback floor: if Phase-1 commits < this, take the top-N most-confident "
+        "instead. 0 -> auto = max(1, block_size // steps)",
+    )
     ap.add_argument("--n_layer", type=int, required=True)
     ap.add_argument("--n_embd", type=int, required=True)
     ap.add_argument("--head_size", type=int, default=64)
@@ -672,8 +757,11 @@ def main():
     ap.add_argument("--d_gate_lora", type=int, default=0)
     # REPL: keep model resident, take prompts from stdin in a loop. Avoids
     # re-paying the ~30s cold-start cost per generation.
-    ap.add_argument("--repl", action="store_true",
-                    help="interactive mode: load model once, prompt-generate loop")
+    ap.add_argument(
+        "--repl",
+        action="store_true",
+        help="interactive mode: load model once, prompt-generate loop",
+    )
     args = ap.parse_args()
 
     tok = RWKVTokenizer(args.vocab) if args.vocab else RWKVTokenizer()
@@ -691,8 +779,13 @@ def main():
         my_testing=args.my_testing,
         grad_cp=0,
         weight_decay=0.0,
-        lr_init=0.0, lr_final=0.0, betas=(0.9, 0.99), adam_eps=1e-18,
-        layerwise_lr=0, my_pile_stage=0, train_stage=0,
+        lr_init=0.0,
+        lr_final=0.0,
+        betas=(0.9, 0.99),
+        adam_eps=1e-18,
+        layerwise_lr=0,
+        my_pile_stage=0,
+        train_stage=0,
         diffusion_mode=0,
         d_decay_lora=args.d_decay_lora,
         d_aaa_lora=args.d_aaa_lora,
@@ -716,22 +809,50 @@ def main():
             # Allow `\n` -> real newline so chat templates work
             prompt_text = line.encode("utf-8").decode("unicode_escape")
             denoise_block_fast._dbg_done = False  # re-enable DBG print for new run
-            run_one(model, tok, mask_id, args.vocab_size,
-                    prompt_text, args.gen_len, args.steps, args.block_size,
-                    args.temperature, args.top_k, args.top_p,
-                    args.decode_strategy, args.conf_threshold, args.min_per_step,
-                    args.presence_penalty, args.count_penalty, args.penalty_decay,
-                    args.penalize_prompt,
-                    verbose=True)
+            run_one(
+                model,
+                tok,
+                mask_id,
+                args.vocab_size,
+                prompt_text,
+                args.gen_len,
+                args.steps,
+                args.block_size,
+                args.temperature,
+                args.top_k,
+                args.top_p,
+                args.decode_strategy,
+                args.conf_threshold,
+                args.min_per_step,
+                args.presence_penalty,
+                args.count_penalty,
+                args.penalty_decay,
+                args.penalize_prompt,
+                verbose=True,
+            )
             print()
     else:
-        run_one(model, tok, mask_id, args.vocab_size,
-                args.prompt, args.gen_len, args.steps, args.block_size,
-                args.temperature, args.top_k, args.top_p,
-                args.decode_strategy, args.conf_threshold, args.min_per_step,
-                args.presence_penalty, args.count_penalty, args.penalty_decay,
-                args.penalize_prompt,
-                verbose=True)
+        run_one(
+            model,
+            tok,
+            mask_id,
+            args.vocab_size,
+            args.prompt,
+            args.gen_len,
+            args.steps,
+            args.block_size,
+            args.temperature,
+            args.top_k,
+            args.top_p,
+            args.decode_strategy,
+            args.conf_threshold,
+            args.min_per_step,
+            args.presence_penalty,
+            args.count_penalty,
+            args.penalty_decay,
+            args.penalize_prompt,
+            verbose=True,
+        )
 
 
 if __name__ == "__main__":

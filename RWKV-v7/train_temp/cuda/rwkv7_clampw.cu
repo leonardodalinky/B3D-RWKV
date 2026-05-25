@@ -15,7 +15,7 @@ using i64 = long long int;
 typedef bf * __restrict__ F_;
 constexpr float W_SCALE = -0.6065306597f; // -exp(-0.5)
 
-//###################################################################################################### 
+//######################################################################################################
 
 template<int N> __launch_bounds__(N,2)
 __global__ void forward_kernel(int T,int H,F_ r_,F_ w_,F_ k_,F_ v_,F_ a_,F_ b_,bf* __restrict__ y_,float* s__,float* __restrict__ sa_)
@@ -78,7 +78,7 @@ void cuda_forward(int B,int T,int H,bf*r,bf*w,bf*k,bf*v,bf*a,bf*b,bf*y,float*s,f
     forward_kernel<_N_><<<dim3(H,B),dim3(_N_)>>>(T,H,r,w,k,v,a,b,y,s,sa);
 }
 
-//###################################################################################################### 
+//######################################################################################################
 
 template<int N>
 __global__ void backward_kernel(int T, int H, F_ r_, F_ w_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_, float * __restrict__ s__, float * __restrict__ sa_, bf* dr_, bf* dw_, bf* dk_, bf* dv_, bf* da_, bf* db_)

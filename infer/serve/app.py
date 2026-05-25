@@ -2,6 +2,7 @@
 backed by a single DiffuRWKV model instance. See serve/README.md for the
 supported subset of OpenAI semantics and what's intentionally rejected.
 """
+
 from __future__ import annotations
 
 import os
@@ -12,13 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .engine import InferenceEngine
-from .protocol import (
-    APIError,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    Model,
-    ModelList,
-)
+from .protocol import APIError, ChatCompletionRequest, ChatCompletionResponse, Model, ModelList
 
 
 # ----------------------------------------------------------------------------
@@ -45,8 +40,13 @@ def _build_engine() -> InferenceEngine:
         my_testing=os.environ.get("MY_TESTING", "x070"),
         grad_cp=0,
         weight_decay=0.0,
-        lr_init=0.0, lr_final=0.0, betas=(0.9, 0.99), adam_eps=1e-18,
-        layerwise_lr=0, my_pile_stage=0, train_stage=0,
+        lr_init=0.0,
+        lr_final=0.0,
+        betas=(0.9, 0.99),
+        adam_eps=1e-18,
+        layerwise_lr=0,
+        my_pile_stage=0,
+        train_stage=0,
         diffusion_mode=0,
         d_decay_lora=_env_int("D_DECAY_LORA", 128),
         d_aaa_lora=_env_int("D_AAA_LORA", 128),
@@ -67,7 +67,8 @@ def _build_engine() -> InferenceEngine:
         ckpt,
         model_args,
         defaults=defaults,
-        max_tokens_cap=_env_int("MAX_TOKENS", 2048),
+        max_tokens_default=_env_int("MAX_TOKENS", 2048),
+        max_tokens_cap=_env_int("MAX_TOKENS_CAP", 16384),
     )
 
 
@@ -118,9 +119,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         return _err(400, "messages must end with a user message", param="messages")
 
     try:
-        return await engine.generate(
-            req, prompt=prompt, model_name=request.app.state.model_name
-        )
+        return await engine.generate(req, prompt=prompt, model_name=request.app.state.model_name)
     except Exception as e:
         # Unexpected — log and return a generic 500 so we don't leak stack.
         print(f"[serve] inference error: {type(e).__name__}: {e}", flush=True)

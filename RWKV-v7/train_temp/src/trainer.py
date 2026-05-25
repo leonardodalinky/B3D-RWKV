@@ -1,14 +1,21 @@
-import os, math, time, datetime, subprocess
-import torch
-from torch.utils.data import DataLoader
+import datetime
+import math
+import os
+import subprocess
+import time
+
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
+from torch.utils.data import DataLoader
+
 
 def my_save(args, trainer, dd, ff):
-    if 'deepspeed_stage_3' in args.strategy:
+    if "deepspeed_stage_3" in args.strategy:
         trainer.save_checkpoint(ff, weights_only=True)
     else:
         torch.save(dd, ff)
+
 
 class train_callback(pl.Callback):
     def __init__(self, args):
@@ -23,21 +30,24 @@ class train_callback(pl.Callback):
         # LR schedule
         w_step = args.warmup_steps
 
-        if args.my_exit_tokens != 0: # cosine decay
+        if args.my_exit_tokens != 0:  # cosine decay
             real_tokens = real_step * args.ctx_len * args.real_bsz
             warmup_tokens = w_step * args.ctx_len * args.real_bsz
             progress = (real_tokens - warmup_tokens) / (abs(args.my_exit_tokens) - warmup_tokens)
             progress = max(0, min(1, progress))
-            lr_final_factor = args.lr_final / args.lr_init                
-            lr_mult = (0.5 + lr_final_factor / 2) + (0.5 - lr_final_factor / 2) * math.cos(math.pi * progress)
+            lr_final_factor = args.lr_final / args.lr_init
+            lr_mult = (0.5 + lr_final_factor / 2) + (0.5 - lr_final_factor / 2) * math.cos(
+                math.pi * progress
+            )
             if args.my_exit_tokens > 0:
                 lr = args.lr_init * lr_mult
             else:
                 lr = (lr + args.lr_init * lr_mult) / 2
             if progress >= 1:
-                if (trainer.is_global_zero) or ('deepspeed_stage_3' in args.strategy):
+                if (trainer.is_global_zero) or ("deepspeed_stage_3" in args.strategy):
                     my_save(
-                        args, trainer,
+                        args,
+                        trainer,
                         pl_module.state_dict(),
                         f"{args.proj_dir}/rwkv-final.pth",
                     )
@@ -70,6 +80,7 @@ class train_callback(pl.Callback):
                 if len(args.wandb) > 0:
                     print("Login to wandb...")
                     import wandb
+
                     wandb.init(
                         project=args.wandb,
                         name=args.run_name + " " + args.my_timestamp,
@@ -102,21 +113,26 @@ class train_callback(pl.Callback):
             self.log("loss", trainer.my_epoch_loss, prog_bar=True, on_step=True)
 
             if len(args.wandb) > 0:
-                lll = {"loss": trainer.my_loss, "lr": trainer.my_lr, "wd": trainer.my_wd, "Gtokens": real_step * token_per_step / 1e9}
+                lll = {
+                    "loss": trainer.my_loss,
+                    "lr": trainer.my_lr,
+                    "wd": trainer.my_wd,
+                    "Gtokens": real_step * token_per_step / 1e9,
+                }
                 if kt_s > 0:
                     lll["kt/s"] = kt_s
                 trainer.my_wandb.log(lll, step=int(real_step))
 
-        if (trainer.is_global_zero) or ('deepspeed_stage_3' in args.strategy): # save pth
+        if (trainer.is_global_zero) or ("deepspeed_stage_3" in args.strategy):  # save pth
             if args.magic_prime > 0:
                 if int(real_step) == int(args.magic_prime // args.real_bsz) - 1:
                     to_save_dict = pl_module.state_dict()
                     my_save(
-                        args, trainer,
+                        args,
+                        trainer,
                         to_save_dict,
                         f"{args.proj_dir}/rwkv-final.pth",
                     )
-                
 
     def on_train_epoch_start(self, trainer, pl_module):
         args = self.args
@@ -130,30 +146,36 @@ class train_callback(pl.Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         args = self.args
         to_save_dict = {}
-        if (trainer.is_global_zero) or ('deepspeed_stage_3' in args.strategy):  # save pth
-            if (args.epoch_save > 0 and trainer.current_epoch % args.epoch_save == 0) or (trainer.current_epoch == args.epoch_count - 1):
-                if args.data_type == 'wds_img':
+        if (trainer.is_global_zero) or ("deepspeed_stage_3" in args.strategy):  # save pth
+            if (args.epoch_save > 0 and trainer.current_epoch % args.epoch_save == 0) or (
+                trainer.current_epoch == args.epoch_count - 1
+            ):
+                if args.data_type == "wds_img":
                     raw_dict = pl_module.state_dict()
                     for k in raw_dict:
-                        if k.startswith('encoder.') or k.startswith('decoder.'):
+                        if k.startswith("encoder.") or k.startswith("decoder."):
                             to_save_dict[k] = raw_dict[k]
                 else:
                     to_save_dict = pl_module.state_dict()
                 try:
                     my_save(
-                        args, trainer,
+                        args,
+                        trainer,
                         to_save_dict,
                         f"{args.proj_dir}/rwkv-{args.epoch_begin + trainer.current_epoch}.pth",
                     )
                 except Exception as e:
-                    print('Error\n\n', e, '\n\n')
+                    print("Error\n\n", e, "\n\n")
 
         if trainer.is_global_zero:  # logging
-            trainer.my_log.write(f"{args.epoch_begin + trainer.current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {trainer.current_epoch}\n")
+            trainer.my_log.write(
+                f"{args.epoch_begin + trainer.current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {trainer.current_epoch}\n"
+            )
             trainer.my_log.flush()
 
             trainer.my_loss_sum = 0
             trainer.my_loss_count = 0
+
 
 @rank_zero_only
 def generate_init_weight(model, init_weight_name):
@@ -167,29 +189,29 @@ def generate_init_weight(model, init_weight_name):
                 try:
                     assert k in mm
                 except:
-                    print('missing', k)
+                    print("missing", k)
                     exit(0)
                 src = load_dict[k]
                 try:
                     mm[k] = src.reshape(mm[k].shape)
                 except:
                     tmp = mm[k].squeeze().clone()
-                    print(k, src.shape, '-->', mm[k].shape)
+                    print(k, src.shape, "-->", mm[k].shape)
                     ss = src.shape[0]
                     dd = tmp.shape[0]
                     for i in range(dd):
                         pos = i / dd * ss
                         if pos >= ss - 1:
-                            tmp[i] = src[ss-1]
+                            tmp[i] = src[ss - 1]
                         else:
                             p0 = int(math.floor(pos))
                             ii = pos - p0
-                            tmp[i] = src[p0] * (1-ii) + src[p0+1] * (ii)
+                            tmp[i] = src[p0] * (1 - ii) + src[p0 + 1] * (ii)
                     mm[k] = tmp.reshape(mm[k].shape)
                     sss = src.squeeze().float().cpu().numpy()
-                    print(sss[:10], '...', sss[-10:])
+                    print(sss[:10], "...", sss[-10:])
                     mmm = mm[k].squeeze().float().cpu().numpy()
-                    print(mmm[:10], '...', mmm[-10:])
+                    print(mmm[:10], "...", mmm[-10:])
 
     print(f"Save to {init_weight_name}...")
     torch.save(mm, init_weight_name)

@@ -1,4 +1,22 @@
-# DiffuRWKV
+<div align="center">
+  <!-- <img src="./assets/logo.png" alt="Logo" width="400"> -->
+  <h1 align="center">Triplet-Block Diffusion RWKV
+ </h1>
+</div>
+
+<div align="center">
+    <!-- <a href="TODO"><img src="https://img.shields.io/badge/Project Page-blue?style=for-the-badge&color=1a1a2e&logo=homepage&logoColor=orange" alt="Project Page"></a> -->
+    <a href="https://arxiv.org/abs/TODO"><img src="https://img.shields.io/badge/arXiv-<arxiv.id>-brightred?color=B31B1B&logo=arXiv&style=for-the-badge" alt="ArXiv"></a>
+    <!-- <br/> -->
+    <a href="https://huggingface.co/spaces/TODO"><img src="https://img.shields.io/badge/Huggingface-555555?logo=huggingface&style=for-the-badge" alt="Hugging Face"></a>
+    <!-- <br/> -->
+    <a href="https://pre-commit.com/"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&style=for-the-badge" alt="pre-commit">
+    </a>
+</div>
+
+## 🔥 News
+
+- **[2026, May]**: TODO
 
 ## Training
 
@@ -11,7 +29,7 @@ Loss is computed only on `b2`'s originally-masked positions. Because b1 sits in 
 of b2 in the RNN time order, b2's hidden state has already absorbed every unmasked
 token in b1, giving block-internal pseudo-bidirectional access. b3 (clean) refreshes
 the RNN state with ground truth so the next logical block trains in parallel without
-compounding errors. See [CLAUDE.md](CLAUDE.md) for the full design.
+compounding errors.
 
 ### 1. Setup
 
@@ -21,30 +39,32 @@ uv sync --group data     # additionally for data prep (datasets, ftfy, tokenizer
 ```
 
 GPU node prerequisites for actually running training:
-- `nvcc` on `PATH` and a matching `gcc` (Anvil: `module load modtree/gpu`).
+- `nvcc` on `PATH` and a matching `gcc`.
 - The CUDA kernels under [`train/cuda/`](train/cuda/) are JIT-compiled at first model import.
 
 ### 2. Build the training data
 
-We use [`allenai/tulu-3-sft-mixture`](https://huggingface.co/datasets/allenai/tulu-3-sft-mixture).
 Two stages: HF → JSONL formatted with the RWKV-v7 G1x chat template, then JSONL → binidx.
 
 ```bash
-# end-to-end (writes to train/data/ by default)
-bash train/data_prep/build_tulu3_binidx.sh
 # smoke test with 100 conversations
-bash train/data_prep/build_tulu3_binidx.sh --limit 100
+bash train/data_prep/build_tulu3_jsonl.sh --limit 100
+
+# end-to-end (writes to train/data/ by default)
+bash train/data_prep/build_tulu3_jsonl.sh
+bash train/data_prep/build_glm_reasoning_jsonl.sh
+bash train/data_prep/build_claude_reasoning_jsonl.sh
+
+# Concat these three datasets
+cat train/data/* > train/data/combined.jsonl
+
+# Convert to binidx (multi-threaded, CPU-only)
+bash train/data_prep/merge_and_binidx.sh data/combined.jsonl data/combined_binidx/combined
 ```
 
-On Anvil submit the same pipeline as a SLURM job:
-
-```bash
-sbatch tmp_build_tulu3.slurm
-```
-
-Output: `<DATA_DIR>/tulu3_text_document.{bin,idx}`. The `_text_document` suffix is
+Output: `train/data/concatenated.{bin,idx}`. The `_text_document` suffix is
 appended automatically by the json2binidx tool — train with
-`--data_file <DATA_DIR>/tulu3_text_document` (no extension).
+`--data_file train/data/concatenated` (no extension).
 
 ### 3. Pick `magic_prime`
 
@@ -93,7 +113,7 @@ Diffusion-mode CLI flags added on top of the upstream `train.py`:
 | `--diff_block_size` | `32` | Tokens per logical block. |
 | `--diff_min_mask_ratio` | `0.0` | Lower bound for the per-sample mask ratio `r ~ Uniform(min, max)`. |
 | `--diff_max_mask_ratio` | `1.0` | Upper bound for `r`. |
-| `--diff_pad_id` | `0` | Token used to pad the tail to `ctx_len` (EOS). **Must differ from MASK.** |
+| `--diff_pad_id` | `65534` | Token used to pad the tail to `ctx_len` (EOS). **Must differ from MASK.** |
 
 Constraints worth knowing:
 - `ctx_len >= 3 * diff_block_size` (asserted at startup). Pick `ctx_len` divisible by
@@ -106,13 +126,9 @@ Constraints worth knowing:
   falls back to `F.cross_entropy(..., ignore_index=-100)` (somewhat slower / more
   VRAM, but correct). Toggle is automatic.
 
-### 5. SLURM (Anvil)
 
-```bash
-sbatch tmp_build_tulu3.slurm     # data prep
-squeue -u $USER
-squeue -j <id> --start           # ETA
-```
+## Inference and Evaluation
 
-Account / partition: see the `#SBATCH` headers in the `tmp_*.slurm` files; available
-queues are `gpu`, `gpu-debug`, `ai` (use `cis260045-{gpu,ai}` accounts respectively).
+Please refer to the [inference README](infer/README.md) for details on running the model in inference mode and [serving README](infer/serve/README.md) for details on serving the model.
+
+Please also refer to the [evaluation README](eval/README.md) for details on evaluating the model's performance.

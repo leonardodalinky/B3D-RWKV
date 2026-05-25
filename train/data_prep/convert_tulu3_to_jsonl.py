@@ -5,6 +5,8 @@ mask (see preprocess_segments.py).
 Each output JSONL line is one conversation:
 
     {"segments": [
+        {"text": "System: You are a helpful assistant",   "lossable": false},
+        {"text": "\\n\\n",                                "lossable": false},
         {"text": "User: hi",                              "lossable": false},
         {"text": "\\n\\n",                                "lossable": false},
         {"text": "Assistant: <think></think>\\n",          "lossable": false},
@@ -24,17 +26,22 @@ Loss-mask conventions:
   span per turn.
 - tulu-3 conversations have no explicit think block -> we always use the empty
   fake-think prefix (matches RWKV7-G1x "fake thinking" template).
+- If a row has no system message, we prepend the default
+  ``"You are a helpful assistant"`` so every example has a consistent
+  ``System: ...`` prefix (matches the inference server's prompt assembly
+  and the GLM / Claude reasoning converters in this dir).
 """
+
 import argparse
 import json
 import re
 
 from datasets import load_dataset
 
-
 _BLANK_LINES_RE = re.compile(r"\n{2,}")
 _TURN_SEP = "\n\n"
 _ASSISTANT_PREFIX = "Assistant: <think></think>\n"
+_DEFAULT_SYSTEM = "You are a helpful assistant"
 
 
 def clean_txt(txt: str) -> str:
@@ -47,7 +54,14 @@ def conversation_to_segments(messages):
 
     tulu-3 schema: [{"role": "system" | "user" | "assistant", "content": "..."}, ...]
     Returns: list of {"text": str, "lossable": bool} segments.
+
+    If the row doesn't start with a system message, we prepend a synthetic
+    one with ``_DEFAULT_SYSTEM`` content so the System: prefix is always
+    present (mirrors the inference server + the other converters).
     """
+    if not messages or messages[0].get("role") != "system":
+        messages = [{"role": "system", "content": _DEFAULT_SYSTEM}, *messages]
+
     segments = []
     for i, m in enumerate(messages):
         if i > 0:
@@ -73,8 +87,11 @@ def main():
     ap.add_argument("--dataset", default="allenai/tulu-3-sft-mixture")
     ap.add_argument("--split", default="train")
     ap.add_argument("--limit", type=int, default=None, help="cap number of rows (smoke testing)")
-    ap.add_argument("--messages-field", default="messages",
-                    help="name of the messages column (override if dataset uses a different field)")
+    ap.add_argument(
+        "--messages-field",
+        default="messages",
+        help="name of the messages column (override if dataset uses a different field)",
+    )
     args = ap.parse_args()
 
     ds = load_dataset(args.dataset, split=args.split, streaming=False)

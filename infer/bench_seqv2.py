@@ -18,6 +18,7 @@ Acceptance thresholds (see infer/cuda/PORTING_PLAN.md section 1.4):
     top-1 argmax agreement (logits)    >= 99%
     seqv2 wallclock speedup            >= 1.3x
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,8 +50,13 @@ def _build_args_from_env():
         my_testing=os.environ.get("MY_TESTING", "x070"),
         grad_cp=0,
         weight_decay=0.0,
-        lr_init=0.0, lr_final=0.0, betas=(0.9, 0.99), adam_eps=1e-18,
-        layerwise_lr=0, my_pile_stage=0, train_stage=0,
+        lr_init=0.0,
+        lr_final=0.0,
+        betas=(0.9, 0.99),
+        adam_eps=1e-18,
+        layerwise_lr=0,
+        my_pile_stage=0,
+        train_stage=0,
         diffusion_mode=0,
         d_decay_lora=int(os.environ.get("D_DECAY_LORA", "128")),
         d_aaa_lora=int(os.environ.get("D_AAA_LORA", "128")),
@@ -142,8 +148,9 @@ def test_kernel_parity(RWKV7S_OP, RWKV7S_OP_SEQV2, *, T: int, H: int, N: int, se
 # ----------------------------------------------------------------------------
 # Test 3 — wallclock benchmark
 # ----------------------------------------------------------------------------
-def bench(RWKV7S_OP, RWKV7S_OP_SEQV2, *, T: int, H: int, N: int,
-          warmup: int = 20, iters: int = 200):
+def bench(
+    RWKV7S_OP, RWKV7S_OP_SEQV2, *, T: int, H: int, N: int, warmup: int = 20, iters: int = 200
+):
     print(f"\n=== Test 3: wallclock (T={T}, H={H}, N={N}, warmup={warmup}, iters={iters}) ===")
     torch.manual_seed(0)
     C = H * N
@@ -151,13 +158,14 @@ def bench(RWKV7S_OP, RWKV7S_OP_SEQV2, *, T: int, H: int, N: int,
 
     def _rand_inputs():
         return [
-            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5  # r
-            ,torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5  # w_pre (not transformed)
-            ,torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5  # k
-            ,torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5  # v
-            ,torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5  # a
-            ,torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5  # b
+            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5,  # r
+            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5,  # w_pre (not transformed)
+            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5,  # k
+            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5,  # v
+            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5,  # a
+            torch.randn(T, C, dtype=torch.bfloat16, device=dev) * 0.5,  # b
         ]
+
     r, w, k, v, a, b = _rand_inputs()
 
     def _run(op, n):
@@ -174,24 +182,30 @@ def bench(RWKV7S_OP, RWKV7S_OP_SEQV2, *, T: int, H: int, N: int,
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     st = torch.randn(H, N, N, dtype=torch.float32, device=dev) * 0.01
-    torch.cuda.synchronize(); start.record()
+    torch.cuda.synchronize()
+    start.record()
     for _ in range(iters):
         _ = RWKV7S_OP(st, r, w, k, v, a, b)
-    end.record(); torch.cuda.synchronize()
+    end.record()
+    torch.cuda.synchronize()
     ms_old = start.elapsed_time(end) / iters
 
     # Timed seqv2
     st = torch.randn(H, N, N, dtype=torch.float32, device=dev) * 0.01
-    torch.cuda.synchronize(); start.record()
+    torch.cuda.synchronize()
+    start.record()
     for _ in range(iters):
         _ = RWKV7S_OP_SEQV2(st, r, w, k, v, a, b)
-    end.record(); torch.cuda.synchronize()
+    end.record()
+    torch.cuda.synchronize()
     ms_new = start.elapsed_time(end) / iters
 
     speedup = ms_old / ms_new
     print(f"  wkv7s       : {ms_old:7.3f} ms / iter")
     print(f"  wkv7s_seqv2 : {ms_new:7.3f} ms / iter")
-    print(f"  speedup     : {speedup:.2f}x   ({'PASS' if speedup >= 1.3 else 'BELOW TARGET (1.3x)'})")
+    print(
+        f"  speedup     : {speedup:.2f}x   ({'PASS' if speedup >= 1.3 else 'BELOW TARGET (1.3x)'})"
+    )
     return speedup >= 1.3
 
 
@@ -203,11 +217,11 @@ def test_full_model_parity(ckpt: str, *, T: int):
     args_for_model = _build_args_from_env()
     args_for_model.ctx_len = max(args_for_model.ctx_len, T + 32)
     import diffusion_sample as ds  # noqa: E402
+
     model = ds.build_model(ckpt, args_for_model)
     # Build a deterministic input.
     torch.manual_seed(0)
-    inp = torch.randint(1, args_for_model.vocab_size - 2, (T,),
-                        device="cuda", dtype=torch.long)
+    inp = torch.randint(1, args_for_model.vocab_size - 2, (T,), device="cuda", dtype=torch.long)
 
     # Run once with seqv2 (T >= 8 hits seqv2 via the dispatch in _tmix_seq).
     state_new = model.init_state()
@@ -216,6 +230,7 @@ def test_full_model_parity(ckpt: str, *, T: int):
     # Run once with the old kernel forced. Monkey-patch the dispatch to
     # always pick RWKV7S_OP — no need to change model.py just to test.
     import src.model as M  # noqa: E402
+
     saved = M.RWKV7S_OP_SEQV2
     M.RWKV7S_OP_SEQV2 = M.RWKV7S_OP  # dispatch will still see "T >= 8" but op is the old one
     try:
@@ -228,7 +243,9 @@ def test_full_model_parity(ckpt: str, *, T: int):
     argmax_new = logits_new.argmax(dim=-1)
     argmax_old = logits_old.argmax(dim=-1)
     agree = (argmax_new == argmax_old).float().mean().item()
-    print(f"  max|Δlogits| = {dlogits.max().item():.4e}    mean|Δlogits| = {dlogits.mean().item():.4e}")
+    print(
+        f"  max|Δlogits| = {dlogits.max().item():.4e}    mean|Δlogits| = {dlogits.mean().item():.4e}"
+    )
     print(f"  top-1 argmax agreement on logits: {agree*100:.2f}%")
     pass_d = dlogits.max().item() < 1e-1
     pass_a = agree >= 0.99
@@ -239,8 +256,7 @@ def test_full_model_parity(ckpt: str, *, T: int):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", default=None,
-                   help="path to rwkv-N.pth (required for Test 2)")
+    p.add_argument("--ckpt", default=None, help="path to rwkv-N.pth (required for Test 2)")
     p.add_argument("--T", type=int, default=int(os.environ.get("T", "64")))
     p.add_argument("--H", type=int, default=int(os.environ.get("H", "64")))
     p.add_argument("--N", type=int, default=int(os.environ.get("N", "64")))
@@ -248,23 +264,34 @@ def main():
     p.add_argument("--iters", type=int, default=200)
     args = p.parse_args()
 
-    print(f"[bench_seqv2] shape T={args.T}, H={args.H}, N={args.N}; cuda={torch.cuda.get_device_name(0)}")
+    print(
+        f"[bench_seqv2] shape T={args.T}, H={args.H}, N={args.N}; cuda={torch.cuda.get_device_name(0)}"
+    )
 
     # The kernel load runs at import. Bring them in.
     RWKV7S_OP, RWKV7S_OP_SEQV2 = _import_ops()
 
     ok1 = test_kernel_parity(RWKV7S_OP, RWKV7S_OP_SEQV2, T=args.T, H=args.H, N=args.N)
-    ok3 = bench(RWKV7S_OP, RWKV7S_OP_SEQV2, T=args.T, H=args.H, N=args.N,
-                warmup=args.warmup, iters=args.iters)
+    ok3 = bench(
+        RWKV7S_OP,
+        RWKV7S_OP_SEQV2,
+        T=args.T,
+        H=args.H,
+        N=args.N,
+        warmup=args.warmup,
+        iters=args.iters,
+    )
 
     ok2 = True
     if args.ckpt is not None:
         ok2 = test_full_model_parity(args.ckpt, T=args.T)
 
     print()
-    print(f"Summary: kernel parity = {'PASS' if ok1 else 'FAIL'} | "
-          f"speedup = {'PASS' if ok3 else 'BELOW'} | "
-          f"full-model parity = {'PASS' if ok2 else 'FAIL' if args.ckpt else 'SKIPPED'}")
+    print(
+        f"Summary: kernel parity = {'PASS' if ok1 else 'FAIL'} | "
+        f"speedup = {'PASS' if ok3 else 'BELOW'} | "
+        f"full-model parity = {'PASS' if ok2 else 'FAIL' if args.ckpt else 'SKIPPED'}"
+    )
     sys.exit(0 if (ok1 and ok3 and ok2) else 1)
 
 

@@ -1,0 +1,97 @@
+# DiffuRWKV evaluation tasks (API/chat-completions mode).
+#
+# Every task here MUST produce `output_type: generate_until` because the
+# deployed server (infer/serve) exposes ONLY /v1/chat/completions -- there
+# are no per-token logprobs to do loglikelihood scoring with. The originally
+# loglikelihood-only benchmarks (mmlu, arc, gpqa) are swapped to their
+# generative variants below.
+#
+# Per-task fields (all optional except num_fewshot):
+#   num_fewshot:           int      few-shot examples (0 = zero-shot)
+#   unsafe_code:           bool     adds --confirm_run_unsafe_code (humaneval/mbpp)
+#   fewshot_as_multiturn:  bool     adds --fewshot_as_multiturn (chat is always on)
+#   max_gen_toks:          int      per-task gen budget; 0 = use launcher MAX_GEN_TOKS
+#   gen_kwargs:            dict     extra fields merged into lm-eval --gen_kwargs.
+#                                   Useful for top_p, temperature, presence_penalty,
+#                                   etc. Per-task entries override the launcher's
+#                                   GEN_KWARGS on key conflicts. Values must NOT
+#                                   contain whitespace (awk field-split limitation).
+#                                   e.g.  gen_kwargs: {top_p: 0.85}
+#
+# To run a subset, pass TASKS=mmlu_generative_new,gsm8k_cot:
+#     TASKS=mmlu_generative_new,gsm8k_cot bash eval/run_eval.sh
+#
+# Tip: confirm a task name exists with
+#     lm-eval --tasks list 2>/dev/null | grep -E '^\s*<name>' || \
+#     ls .venv/lib/python3.11/site-packages/lm_eval/tasks | grep -i <name>
+#
+# max_gen_toks budget: every task here is set to 8192 to accommodate the
+# server's think mode (reasoning_effort=medium by default in run_eval.sh).
+# Think mode emits a reasoning span before the answer; even short-answer
+# tasks like mmlu_generative_new need headroom for the reasoning before the
+# final letter. If you switch back to no-think eval, you can drop these to
+# 64-256 to save server time.
+
+# Note: tasks suffixed with `_new` are our local clones of upstream tasks,
+# living under eval/tasks/<name>/. They're listed here (instead of the
+# upstream variants) so prompt / filter / metric tweaks land in this repo
+# rather than site-packages.
+
+# ---- Knowledge / multiple-choice (generative variants) ----
+# mmlu_generative_new: local clone of upstream mmlu_generative (57-subject
+# group) at eval/tasks/mmlu_generative_new/. Edit
+# eval/tasks/mmlu_generative_new/_default_template_yaml to tweak the prompt /
+# filter / metric across all 57 subjects. Standard convention is 5-shot.
+mmlu_generative_new:             { num_fewshot: 0, fewshot_as_multiturn: true, max_gen_toks: 8192, gen_kwargs: {top_p: 1.0, top_k: 50, temperature: 1.0} }
+
+# Llama-style chat variants: ask the model "your response should end with
+# 'The best answer is X'" and parse the letter out of the reply.
+arc_challenge_chat:              { num_fewshot: 0, max_gen_toks: 8192 }
+# arc_easy has no built-in chat variant in lm-eval; we ship a custom one
+# alongside this file. See eval/tasks/arc_easy_chat.yaml -- enabled via
+# `INCLUDE_PATH=eval/tasks` which run_eval.sh sets by default.
+arc_easy_chat:                   { num_fewshot: 0, max_gen_toks: 8192 }
+
+# PIQA and RACE: no chat variants in stock lm-eval and no widely-cited
+# generative re-formulation. Custom YAMLs in eval/tasks/ cover them with the
+# same "answer letter at the end" pattern as arc_*_chat.
+piqa_chat:                       { num_fewshot: 0, max_gen_toks: 8192 }
+race_chat:                       { num_fewshot: 0, max_gen_toks: 8192 }
+
+# ---- GPQA -- graduate-level science (generative n-shot) ----
+# Disabled: Idavidrein/gpqa is a gated HF dataset and we don't have a login
+# on the prefetch host. Re-enable by accepting the license at
+# https://huggingface.co/datasets/Idavidrein/gpqa, then
+#     huggingface-cli login    # or export HF_TOKEN=hf_...
+#     .venv/bin/python eval/prefetch_datasets.py gpqa
+# then rsync the new Idavidrein--gpqa cache subdir to Hetao-gpu.
+#
+# gpqa_main_generative_n_shot_new: local clone at
+# eval/tasks/gpqa_main_generative_n_shot_new/ (3 files: main yaml + shared
+# template _gpqa_generative_n_shot_new_yaml + utils.py). Diamond variant
+# isn't ported -- add if needed.
+gpqa_main_generative_n_shot_new: { num_fewshot: 4, fewshot_as_multiturn: true, max_gen_toks: 8192, gen_kwargs: {top_p: 1.0, top_k: 50, temperature: 1.0} }
+
+# ---- Math reasoning (free-form CoT generation) ----
+# fewshot_as_multiturn keeps the few-shot examples as separate (user, assistant)
+# turns instead of one giant context window.
+#
+# gsm8k_cot lives at eval/tasks/gsm8k_cot.yaml + gsm8k_cot_utils.py (same name
+# as upstream, overrides via --include_path). process_results emits three
+# scores: exact_match / flexible_match / loose_contains -- see gsm8k_cot_utils.py.
+#
+# minerva_math_new: local clone at eval/tasks/minerva_math_new/ (1 group +
+# 7 subject yamls + utils.py).
+gsm8k_cot:                 { num_fewshot: 8, fewshot_as_multiturn: true,                          max_gen_toks: 8192, gen_kwargs: {top_p: 0.5}}
+minerva_math_new:          { num_fewshot: 4, fewshot_as_multiturn: true,                          max_gen_toks: 8192, gen_kwargs: {top_p: 0.5, top_k: 50, temperature: 0.9} }
+# hendrycks_math:        { num_fewshot: 4, fewshot_as_multiturn: true,                          max_gen_toks: 8192, gen_kwargs: {top_p: 0.5} } # legacy sympy grader
+
+# ---- Code (free-form generation; server executes generated code locally) ----
+# unsafe_code: true makes the launcher pass --confirm_run_unsafe_code. The
+# code grader runs in-process on the eval host, so prefer a container/VM if
+# the model's output isn't trusted.
+# fewshot_as_multiturn is OFF for humaneval (task is a one-shot completion;
+# few-shot wrapping breaks the function-body grader) and ON for mbpp
+# (task is a conversational "write a function that ...").
+humaneval:             { num_fewshot: 0, unsafe_code: true,                                    max_gen_toks: 8192 }
+mbpp:                  { num_fewshot: 2, unsafe_code: true, fewshot_as_multiturn: true,        max_gen_toks: 8192 }

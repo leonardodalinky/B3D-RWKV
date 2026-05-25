@@ -1,6 +1,10 @@
 """Verify CUDA Graph forward_fast produces same logits as eager."""
+
 from __future__ import annotations
-import os, sys, time
+
+import os
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,13 +21,28 @@ import diffusion_sample as ds  # noqa
 
 def build_args():
     return SimpleNamespace(
-        n_layer=32, n_embd=4096, dim_att=4096,
+        n_layer=32,
+        n_embd=4096,
+        dim_att=4096,
         dim_ffn=int((4096 * 3.5) // 32 * 32),
-        head_size=64, vocab_size=65536, ctx_len=4096,
-        my_testing="x070", grad_cp=0, weight_decay=0.0,
-        lr_init=0.0, lr_final=0.0, betas=(0.9, 0.99), adam_eps=1e-18,
-        layerwise_lr=0, my_pile_stage=0, train_stage=0, diffusion_mode=0,
-        d_decay_lora=128, d_aaa_lora=128, d_mv_lora=96, d_gate_lora=480,
+        head_size=64,
+        vocab_size=65536,
+        ctx_len=4096,
+        my_testing="x070",
+        grad_cp=0,
+        weight_decay=0.0,
+        lr_init=0.0,
+        lr_final=0.0,
+        betas=(0.9, 0.99),
+        adam_eps=1e-18,
+        layerwise_lr=0,
+        my_pile_stage=0,
+        train_stage=0,
+        diffusion_mode=0,
+        d_decay_lora=128,
+        d_aaa_lora=128,
+        d_mv_lora=96,
+        d_gate_lora=480,
     )
 
 
@@ -50,7 +69,9 @@ step_state_eager = [s.clone() for s in ctx_state]
 inp = torch.cat([cur, cur], dim=0)
 logits_eager, _ = model.forward_fast(inp, step_state_eager, full_output=True)
 torch.cuda.synchronize()
-print(f"[parity] eager logits  |max|={logits_eager.abs().max().item():.4f}  argmax[0]={logits_eager[0].argmax().item()}")
+print(
+    f"[parity] eager logits  |max|={logits_eager.abs().max().item():.4f}  argmax[0]={logits_eager[0].argmax().item()}"
+)
 
 # Eager-vs-eager determinism check (RIGHT here, before any graph stuff).
 step_state_eager2 = [s.clone() for s in ctx_state]
@@ -107,7 +128,9 @@ runner.warmup_and_capture(n_warmup=3)
 runner.set_ctx_state(ctx_state)
 logits_graph = runner.step(cur).clone()
 torch.cuda.synchronize()
-print(f"[parity] graph logits  |max|={logits_graph.abs().max().item():.4f}  argmax[0]={logits_graph[0].argmax().item()}")
+print(
+    f"[parity] graph logits  |max|={logits_graph.abs().max().item():.4f}  argmax[0]={logits_graph[0].argmax().item()}"
+)
 
 # Eager determinism check: 2 calls with same input should match.
 step_state_eager2 = [s.clone() for s in ctx_state]

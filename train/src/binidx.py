@@ -1,9 +1,11 @@
 import os
-import torch
-import numpy as np
 import struct
 from functools import lru_cache
 from itertools import accumulate
+
+import numpy as np
+import torch
+
 
 def print_rank_0(*message):
     pass
@@ -14,11 +16,13 @@ def print_rank_0(*message):
     # else:
     #     print(*message, flush=True)
 
+
 def _warmup_mmap_file(path):
     pass
     # with open(path, "rb") as stream:
     #     while stream.read(100 * 1024 * 1024):
     #         pass
+
 
 dtypes = {
     1: np.uint8,
@@ -31,17 +35,21 @@ dtypes = {
     8: np.uint16,
 }
 
+
 def code(dtype):
     for k in dtypes.keys():
         if dtypes[k] == dtype:
             return k
     raise ValueError(dtype)
 
+
 def index_file_path(prefix_path):
     return prefix_path + ".idx"
 
+
 def data_file_path(prefix_path):
     return prefix_path + ".bin"
+
 
 class MMapIndexedDataset(torch.utils.data.Dataset):
     class Index(object):
@@ -98,7 +106,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
                     self._file.close()
 
             return _Writer()
-        
+
         def __init__(self, path, skip_warmup=True):
             with open(path, "rb") as stream:
                 magic_test = stream.read(9)
@@ -190,9 +198,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
             print_rank_0("    warming up data mmap file...")
             _warmup_mmap_file(data_file_path(self._path))
         print_rank_0("    creating numpy buffer of mmap...")
-        self._bin_buffer_mmap = np.memmap(
-            data_file_path(self._path), mode="r", order="C"
-        )
+        self._bin_buffer_mmap = np.memmap(data_file_path(self._path), mode="r", order="C")
         print_rank_0("    creating memory view of numpy buffer...")
         self._bin_buffer = memoryview(self._bin_buffer_mmap)
 
@@ -215,8 +221,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
         elif isinstance(idx, slice):
             start, stop, step = idx.indices(len(self))
             if step != 1:
-                raise ValueError(
-                    "Slices into indexed_dataset must be contiguous")
+                raise ValueError("Slices into indexed_dataset must be contiguous")
             ptr = self._index._pointers[start]
             sizes = self._index._sizes[idx]
             offsets = list(accumulate(sizes))
@@ -262,6 +267,4 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def exists(path):
-        return os.path.exists(index_file_path(path)) and os.path.exists(
-            data_file_path(path)
-        )
+        return os.path.exists(index_file_path(path)) and os.path.exists(data_file_path(path))

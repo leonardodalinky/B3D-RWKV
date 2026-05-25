@@ -1,0 +1,76 @@
+group: mmlu_generative_new
+group_alias: mmlu (generative, three-mode letter match)
+# Each subgroup aggregates the three metrics emitted by
+# mmlu_utils.process_results (exact_match / flexible_match / loose_contains)
+# against the single passthrough filter `all-text` declared in
+# _default_template_yaml. The metric NAMES here must match the keys returned
+# by process_results AND the filter NAME must match the filter_list entry --
+# stale references silently zero out the column.
+task:
+  - group: stem
+    task:
+      - mmlu_stem_generative_new
+    aggregate_metric_list:
+      - metric: exact_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: flexible_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: loose_contains
+        weight_by_size: true
+        filter_list: all-text
+  - group: other
+    task:
+      - mmlu_other_generative_new
+    aggregate_metric_list:
+      - metric: exact_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: flexible_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: loose_contains
+        weight_by_size: true
+        filter_list: all-text
+  - group: social sciences
+    task:
+      - mmlu_social_sciences_generative_new
+    aggregate_metric_list:
+      - metric: exact_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: flexible_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: loose_contains
+        weight_by_size: true
+        filter_list: all-text
+  - group: humanities
+    task:
+      - mmlu_humanities_generative_new
+    aggregate_metric_list:
+      - metric: exact_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: flexible_match
+        weight_by_size: true
+        filter_list: all-text
+      - metric: loose_contains
+        weight_by_size: true
+        filter_list: all-text
+aggregate_metric_list:
+  - aggregation: mean
+    metric: exact_match
+    weight_by_size: true
+    filter_list: all-text
+  - aggregation: mean
+    metric: flexible_match
+    weight_by_size: true
+    filter_list: all-text
+  - aggregation: mean
+    metric: loose_contains
+    weight_by_size: true
+    filter_list: all-text
+metadata:
+  version: 4

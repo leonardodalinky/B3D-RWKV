@@ -40,10 +40,10 @@ import sys
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Prime search (shared)
 # ---------------------------------------------------------------------------
+
 
 def is_prime(n: int) -> bool:
     if n <= 1:
@@ -80,10 +80,13 @@ def find_magic_prime(slot: int) -> int:
 # Flat-stream helpers
 # ---------------------------------------------------------------------------
 
+
 def infer_data_size_from_bin(bin_path: str, dtype_size: int = 2) -> int:
     """Default RWKV world tokenizer => uint16 => 2 bytes/token."""
     size_bytes = os.path.getsize(bin_path)
-    assert size_bytes % dtype_size == 0, f"{bin_path} size {size_bytes} not divisible by {dtype_size}"
+    assert (
+        size_bytes % dtype_size == 0
+    ), f"{bin_path} size {size_bytes} not divisible by {dtype_size}"
     return size_bytes // dtype_size
 
 
@@ -119,39 +122,73 @@ def derive_idx_path(bin_path: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bin", type=str, default=None,
-                    help="path to <prefix>_text_document.bin (token-count read from file size; "
-                         "the matching .idx is read in --diffusion mode)")
-    ap.add_argument("--data_size", type=int, default=None,
-                    help="(flat-stream only) total tokens in the dataset, if you already know it")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--bin",
+        type=str,
+        default=None,
+        help="path to <prefix>_text_document.bin (token-count read from file size; "
+        "the matching .idx is read in --diffusion mode)",
+    )
+    ap.add_argument(
+        "--data_size",
+        type=int,
+        default=None,
+        help="(flat-stream only) total tokens in the dataset, if you already know it",
+    )
     ap.add_argument("--ctx_len", type=int, required=True)
-    ap.add_argument("--dtype_size", type=int, default=2,
-                    help="bytes per token in the .bin file (uint16=2, uint32=4)")
+    ap.add_argument(
+        "--dtype_size",
+        type=int,
+        default=2,
+        help="bytes per token in the .bin file (uint16=2, uint32=4)",
+    )
 
     # Diffusion-mode toggles
-    ap.add_argument("--diffusion", action="store_true",
-                    help="diffusion training mode: count valid docs (size <= max_doc_tokens) "
-                         "and size magic_prime against that count")
-    ap.add_argument("--block_size", type=int, default=0,
-                    help="(diffusion) tokens per logical block; required when --diffusion")
-    ap.add_argument("--max_doc_tokens", type=int, default=0,
-                    help="(diffusion) keep docs with 0 < size <= max_doc_tokens. "
-                         "0 (default) -> auto = (ctx_len // (3*block_size)) * block_size = raw_len")
+    ap.add_argument(
+        "--diffusion",
+        action="store_true",
+        help="diffusion training mode: count valid docs (size <= max_doc_tokens) "
+        "and size magic_prime against that count",
+    )
+    ap.add_argument(
+        "--block_size",
+        type=int,
+        default=0,
+        help="(diffusion) tokens per logical block; required when --diffusion",
+    )
+    ap.add_argument(
+        "--max_doc_tokens",
+        type=int,
+        default=0,
+        help="(diffusion) keep docs with 0 < size <= max_doc_tokens. "
+        "0 (default) -> auto = (ctx_len // (3*block_size)) * block_size = raw_len",
+    )
     # ACC_GRAD matters: trainer.py's real_tokens = global_step * ctx_len * real_bsz,
     # and PL's global_step is the OPTIMIZER step (incremented every ACC_GRAD micro-
     # batches). So if you accumulate, each "trainer token" represents ACC_GRAD real
     # tokens of forward work, and the EXIT_TOKENS needed to cover 1 dataset pass
     # is divided by ACC_GRAD.
-    ap.add_argument("--acc_grad", type=int, default=1,
-                    help="(diffusion) gradient_accumulation_steps used in training. "
-                         "Required to compute correct EXIT_TOKENS — trainer.py's token "
-                         "counter does NOT factor this in. Pass the same value as "
-                         "$ACC_GRAD in demo-training-run-diffusion.sh.")
-    ap.add_argument("--n_epochs", type=float, default=1.0,
-                    help="(diffusion) print EXIT_TOKENS for this many full passes "
-                         "through the dataset (default 1).")
+    ap.add_argument(
+        "--acc_grad",
+        type=int,
+        default=1,
+        help="(diffusion) gradient_accumulation_steps used in training. "
+        "Required to compute correct EXIT_TOKENS — trainer.py's token "
+        "counter does NOT factor this in. Pass the same value as "
+        "$ACC_GRAD in demo-training-run-diffusion.sh.",
+    )
+    ap.add_argument(
+        "--n_epochs",
+        type=float,
+        default=1.0,
+        help="(diffusion) print EXIT_TOKENS for this many full passes "
+        "through the dataset (default 1).",
+    )
 
     args = ap.parse_args()
 
@@ -165,12 +202,18 @@ def run_flat_stream(args):
     if args.bin is None and args.data_size is None:
         print("ERROR: pass either --bin or --data_size", file=sys.stderr)
         sys.exit(1)
-    data_size = args.data_size if args.data_size is not None else infer_data_size_from_bin(args.bin, args.dtype_size)
+    data_size = (
+        args.data_size
+        if args.data_size is not None
+        else infer_data_size_from_bin(args.bin, args.dtype_size)
+    )
 
     slot = data_size // args.ctx_len
     if slot < 100:
-        print(f"ERROR: only {slot} ctx_len slots available; dataset too small for ctx_len={args.ctx_len}",
-              file=sys.stderr)
+        print(
+            f"ERROR: only {slot} ctx_len slots available; dataset too small for ctx_len={args.ctx_len}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     p = find_magic_prime(slot)
@@ -185,7 +228,10 @@ def run_flat_stream(args):
 
 def run_diffusion(args):
     if args.bin is None:
-        print("ERROR: --diffusion requires --bin (the script reads the matching .idx)", file=sys.stderr)
+        print(
+            "ERROR: --diffusion requires --bin (the script reads the matching .idx)",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if args.block_size <= 0:
         print("ERROR: --diffusion requires --block_size > 0", file=sys.stderr)
@@ -194,8 +240,10 @@ def run_diffusion(args):
     n_blocks = args.ctx_len // (3 * args.block_size)
     raw_len = n_blocks * args.block_size
     if raw_len <= 0:
-        print(f"ERROR: ctx_len ({args.ctx_len}) too small for one triplet (3 * {args.block_size}).",
-              file=sys.stderr)
+        print(
+            f"ERROR: ctx_len ({args.ctx_len}) too small for one triplet (3 * {args.block_size}).",
+            file=sys.stderr,
+        )
         sys.exit(1)
     max_doc_tokens = args.max_doc_tokens or raw_len
 
@@ -204,8 +252,11 @@ def run_diffusion(args):
     n_total = int(sizes.shape[0])
     n_valid = int(((sizes > 0) & (sizes <= max_doc_tokens)).sum())
     if n_valid < 100:
-        print(f"ERROR: only {n_valid} valid docs (out of {n_total}); "
-              f"raise --max_doc_tokens or use a larger dataset", file=sys.stderr)
+        print(
+            f"ERROR: only {n_valid} valid docs (out of {n_total}); "
+            f"raise --max_doc_tokens or use a larger dataset",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     p = find_magic_prime(n_valid)
@@ -249,8 +300,12 @@ def run_diffusion(args):
 
     print(f"mode             = diffusion (per-doc, length filter)")
     print(f"ctx_len          = {args.ctx_len}  (full triplet-padded context)")
-    print(f"block_size       = {args.block_size}  (n_blocks/sample = {n_blocks}, raw_len/sample = {raw_len})")
-    print(f"max_doc_tokens   = {max_doc_tokens}{' (auto = raw_len)' if args.max_doc_tokens == 0 else ''}")
+    print(
+        f"block_size       = {args.block_size}  (n_blocks/sample = {n_blocks}, raw_len/sample = {raw_len})"
+    )
+    print(
+        f"max_doc_tokens   = {max_doc_tokens}{' (auto = raw_len)' if args.max_doc_tokens == 0 else ''}"
+    )
     print(f"acc_grad         = {args.acc_grad}")
     print(f"n_epochs         = {args.n_epochs}")
     print()
@@ -259,19 +314,25 @@ def run_diffusion(args):
     print(f"magic_prime          = {p}   (coverage = {coverage:.4f})")
     print()
     print("Token counts (informational):")
-    print(f"  real content / pass   = {total_real_tokens:>16,}  (sum of kept doc sizes; what to quote externally)")
-    print(f"  forward tokens / pass = {forward_tokens_1pass:>16,}  (real content × ~3 for triplet + pad; FLOPs scale with this)")
+    print(
+        f"  real content / pass   = {total_real_tokens:>16,}  (sum of kept doc sizes; what to quote externally)"
+    )
+    print(
+        f"  forward tokens / pass = {forward_tokens_1pass:>16,}  (real content × ~3 for triplet + pad; FLOPs scale with this)"
+    )
     print()
     print("EXIT_TOKENS (trainer.py cosine target):")
     print(f"  1 epoch              = magic_prime * ctx_len / acc_grad = {one_pass_exit:>16,}")
     print(f"  {args.n_epochs:g} epochs           = {n_pass_exit:>16,}")
     print()
     print("Plug into demo-training-run-diffusion.sh:")
-    print(f"  MAGIC_PRIME=\"{p}\"")
-    print(f"  EXIT_TOKENS=\"{n_pass_exit}\"   # = magic_prime*ctx_len/acc_grad * n_epochs")
-    print(f"  ACC_GRAD=\"{args.acc_grad}\"          # IF YOU CHANGE ACC_GRAD, RECOMPUTE EXIT_TOKENS")
-    print(f"  --diffusion_mode 1 --diff_block_size {args.block_size}"
-          f"{f' --diff_max_doc_tokens {max_doc_tokens}' if args.max_doc_tokens else ''}")
+    print(f'  MAGIC_PRIME="{p}"')
+    print(f'  EXIT_TOKENS="{n_pass_exit}"   # = magic_prime*ctx_len/acc_grad * n_epochs')
+    print(f'  ACC_GRAD="{args.acc_grad}"          # IF YOU CHANGE ACC_GRAD, RECOMPUTE EXIT_TOKENS')
+    print(
+        f"  --diffusion_mode 1 --diff_block_size {args.block_size}"
+        f"{f' --diff_max_doc_tokens {max_doc_tokens}' if args.max_doc_tokens else ''}"
+    )
 
 
 if __name__ == "__main__":

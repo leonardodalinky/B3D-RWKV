@@ -1,0 +1,39 @@
+# pass@k variant of mbpp. run_eval.sh substitutes __PASS_K__ at launch.
+# Uses utils.py from this dir (NOT upstream mbpp's) which adds a pass_at_k
+# function (upstream only has pass_at_1).
+task: mbpp_passk
+dataset_path: google-research-datasets/mbpp
+dataset_name: full
+unsafe_code: true
+output_type: generate_until
+test_split: test
+doc_to_text: "You are an expert Python programmer, and here is your task: {{text}} Your code should pass these tests:\n\n{{test_list[0]}}\n{{test_list[1]}}\n{{test_list[2]}}\n[BEGIN]\n"
+doc_to_target: "{% if is_fewshot is defined %}{{code}}\n[DONE]{% else %}{{test_list[0]}}\n{{test_list[1]}}\n{{test_list[2]}}{% endif %}"
+target_delimiter: ""
+repeats: __PASS_K__
+metric_list:
+  - metric: !function utils.pass_at_k
+    aggregation: mean
+    higher_is_better: true
+    k: [__PASS_K__]
+generation_kwargs:
+  until:
+    - "[DONE]"
+  max_gen_toks: 1024
+  do_sample: true
+  temperature: 0.8
+num_fewshot: 3
+fewshot_config:
+  sampler: first_n
+  samples: !function utils.list_fewshot_samples
+# Filter is REQUIRED for repeats>1: without it, lm-eval's default reducer
+# collapses the K resps per doc into a single string. utils.build_predictions
+# preserves the per-doc list of K (after extracting code blocks from each),
+# which is the shape evaluate.code_eval.compute() needs for pass@k.
+filter_list:
+  - name: "create_test"
+    filter:
+      - function: "custom"
+        filter_fn: !function utils.build_predictions
+metadata:
+  version: 1.0

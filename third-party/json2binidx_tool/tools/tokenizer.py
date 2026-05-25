@@ -17,13 +17,11 @@
 
 """Megatron tokenizers."""
 
-from abc import ABC
-from abc import abstractmethod
-
-from tokenizers import Tokenizer
-from rwkv_tokenizer import RWKV_TOKENIZER, TRIE_TOKENIZER
-
+from abc import ABC, abstractmethod
 from typing import List, Union
+
+from rwkv_tokenizer import RWKV_TOKENIZER, TRIE_TOKENIZER
+from tokenizers import Tokenizer
 
 
 def build_tokenizer(args):
@@ -40,9 +38,7 @@ def build_tokenizer(args):
         assert args.vocab_file is not None
         tokenizer = RWKVTokenizer(args.vocab_file)
     else:
-        raise NotImplementedError(
-            "{} tokenizer is not " "implemented.".format(args.tokenizer_type)
-        )
+        raise NotImplementedError("{} tokenizer is not " "implemented.".format(args.tokenizer_type))
 
     # Add vocab size.
     args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size, args)
@@ -102,33 +98,23 @@ class AbstractTokenizer(ABC):
 
     @property
     def cls(self):
-        raise NotImplementedError(
-            "CLS is not provided for {} " "tokenizer".format(self.name)
-        )
+        raise NotImplementedError("CLS is not provided for {} " "tokenizer".format(self.name))
 
     @property
     def sep(self):
-        raise NotImplementedError(
-            "SEP is not provided for {} " "tokenizer".format(self.name)
-        )
+        raise NotImplementedError("SEP is not provided for {} " "tokenizer".format(self.name))
 
     @property
     def pad(self):
-        raise NotImplementedError(
-            "PAD is not provided for {} " "tokenizer".format(self.name)
-        )
+        raise NotImplementedError("PAD is not provided for {} " "tokenizer".format(self.name))
 
     @property
     def eod(self):
-        raise NotImplementedError(
-            "EOD is not provided for {} " "tokenizer".format(self.name)
-        )
+        raise NotImplementedError("EOD is not provided for {} " "tokenizer".format(self.name))
 
     @property
     def mask(self):
-        raise NotImplementedError(
-            "MASK is not provided for {} " "tokenizer".format(self.name)
-        )
+        raise NotImplementedError("MASK is not provided for {} " "tokenizer".format(self.name))
 
 
 class HFTokenizer(AbstractTokenizer):
@@ -171,7 +157,7 @@ class HFTokenizer(AbstractTokenizer):
 class RWKVTokenizer(AbstractTokenizer):
     """RWKV Worlds Tokenizer."""
 
-    def __init__(self, vocab_file='rwkv_vocab_v20230424.txt'):
+    def __init__(self, vocab_file="rwkv_vocab_v20230424.txt"):
         name = "RWKVTokenizer"
         super().__init__(name)
 

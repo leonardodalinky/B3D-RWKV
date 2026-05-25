@@ -3,57 +3,88 @@
 ########################################################################################################
 
 import logging
+
 logging.basicConfig(level=logging.INFO)
 
 import os
-print(f"[mem-config] PYTORCH_CUDA_ALLOC_CONF={os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '<unset>')}")
-print(f"[mem-config] CUBLAS_WORKSPACE_CONFIG={os.environ.get('CUBLAS_WORKSPACE_CONFIG', '<unset>')}")
+
+print(
+    f"[mem-config] PYTORCH_CUDA_ALLOC_CONF={os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '<unset>')}"
+)
+print(
+    f"[mem-config] CUBLAS_WORKSPACE_CONFIG={os.environ.get('CUBLAS_WORKSPACE_CONFIG', '<unset>')}"
+)
 
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
+
+    import pytorch_lightning as pl
     from pytorch_lightning import Trainer
     from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
-    import pytorch_lightning as pl
 
     rank_zero_info("########## work in progress ##########")
 
     parser = ArgumentParser()
 
     parser.add_argument("--load_model", default="", type=str)  # full path, with .pth
-    parser.add_argument("--wandb", default="", type=str)  # wandb project name. if "" then don't use wandb
+    parser.add_argument(
+        "--wandb", default="", type=str
+    )  # wandb project name. if "" then don't use wandb
     parser.add_argument("--proj_dir", default="out", type=str)
     parser.add_argument("--random_seed", default="-1", type=int)
 
     parser.add_argument("--data_file", default="", type=str)
     parser.add_argument("--data_type", default="utf-8", type=str)
-    parser.add_argument("--vocab_size", default=0, type=int)  # vocab_size = 0 means auto (for char-level LM and .txt data)
+    parser.add_argument(
+        "--vocab_size", default=0, type=int
+    )  # vocab_size = 0 means auto (for char-level LM and .txt data)
 
     parser.add_argument("--ctx_len", default=1024, type=int)
-    parser.add_argument("--epoch_steps", default=1000, type=int)  # a mini "epoch" has [epoch_steps] steps
-    parser.add_argument("--epoch_count", default=500, type=int)  # train for this many "epochs". will continue afterwards with lr = lr_final
-    parser.add_argument("--epoch_begin", default=0, type=int)  # if you load a model trained for x "epochs", set epoch_begin = x
-    parser.add_argument("--epoch_save", default=5, type=int)  # save the model every [epoch_save] "epochs"
+    parser.add_argument(
+        "--epoch_steps", default=1000, type=int
+    )  # a mini "epoch" has [epoch_steps] steps
+    parser.add_argument(
+        "--epoch_count", default=500, type=int
+    )  # train for this many "epochs". will continue afterwards with lr = lr_final
+    parser.add_argument(
+        "--epoch_begin", default=0, type=int
+    )  # if you load a model trained for x "epochs", set epoch_begin = x
+    parser.add_argument(
+        "--epoch_save", default=5, type=int
+    )  # save the model every [epoch_save] "epochs"
 
-    parser.add_argument("--micro_bsz", default=12, type=int)  # micro batch size (batch size per GPU)
+    parser.add_argument(
+        "--micro_bsz", default=12, type=int
+    )  # micro batch size (batch size per GPU)
     parser.add_argument("--n_layer", default=6, type=int)
     parser.add_argument("--n_embd", default=512, type=int)
     parser.add_argument("--dim_att", default=0, type=int)
     parser.add_argument("--dim_ffn", default=0, type=int)
 
-    parser.add_argument("--lr_init", default=6e-4, type=float)  # 6e-4 for L12-D768, 4e-4 for L24-D1024, 3e-4 for L24-D2048
+    parser.add_argument(
+        "--lr_init", default=6e-4, type=float
+    )  # 6e-4 for L12-D768, 4e-4 for L24-D1024, 3e-4 for L24-D2048
     parser.add_argument("--lr_final", default=1e-5, type=float)
     parser.add_argument("--warmup_steps", default=-1, type=int)  # try 10 if you load a model
     parser.add_argument("--beta1", default=0.9, type=float)
     parser.add_argument("--beta2", default=0.99, type=float)
     parser.add_argument("--adam_eps", default=1e-18, type=float)
-    parser.add_argument("--grad_cp", default=0, type=int)  # gradient checkpt: saves VRAM, but slower
-    parser.add_argument("--weight_decay", default=0, type=float) # try 0.1
-    parser.add_argument("--grad_clip", default=1.0, type=float) # reduce it to 0.7 / 0.5 / 0.3 / 0.2 for problematic samples
+    parser.add_argument(
+        "--grad_cp", default=0, type=int
+    )  # gradient checkpt: saves VRAM, but slower
+    parser.add_argument("--weight_decay", default=0, type=float)  # try 0.1
+    parser.add_argument(
+        "--grad_clip", default=1.0, type=float
+    )  # reduce it to 0.7 / 0.5 / 0.3 / 0.2 for problematic samples
 
     parser.add_argument("--train_stage", default=0, type=int)  # my special pile mode
-    parser.add_argument("--ds_bucket_mb", default=500, type=int)  # deepspeed bucket size in MB. 200 seems enough
-    parser.add_argument("--head_size", default=64, type=int) # can try larger values for larger models
+    parser.add_argument(
+        "--ds_bucket_mb", default=500, type=int
+    )  # deepspeed bucket size in MB. 200 seems enough
+    parser.add_argument(
+        "--head_size", default=64, type=int
+    )  # can try larger values for larger models
     # LoRA ranks for w/a/v/g time-mix projections. 0 (default) -> n_embd-scaled
     # heuristic in src/model.py. Set explicitly to match a pretrained ckpt.
     # Reference: RWKV7-G1f-7.2B uses 128 / 128 / 96 / 480.
@@ -69,16 +100,26 @@ if __name__ == "__main__":
     # "8bit" (~3 B/param bnb AdamW8bit, less stable). --optim_8bit 1 still selects 8bit.
     parser.add_argument("--optim", default="adam", type=str, choices=["adam", "adafactor", "8bit"])
     parser.add_argument("--magic_prime", default=0, type=int)
-    parser.add_argument("--my_testing", default='x070', type=str)
+    parser.add_argument("--my_testing", default="x070", type=str)
     parser.add_argument("--my_exit_tokens", default=0, type=int)
 
     # ---- Diffusion (dLLM-style infilling) training mode ----
-    parser.add_argument("--diffusion_mode", default=0, type=int)              # 0 = standard LM, 1 = triplet diffusion
-    parser.add_argument("--diff_block_size", default=32, type=int)            # tokens per logical block
-    parser.add_argument("--diff_min_mask_ratio", default=0.0, type=float)     # lower bound for per-sample r
-    parser.add_argument("--diff_max_mask_ratio", default=1.0, type=float)     # upper bound for per-sample r
-    parser.add_argument("--diff_pad_id", default=65534, type=int)             # pad token for tail. Dedicated dummy slot (penultimate; MASK uses last). MUST NOT be EOS (0) or MASK (vocab_size-1).
-    parser.add_argument("--diff_max_doc_tokens", default=0, type=int)         # 0 => auto (= n_blocks * block_size); drop docs longer than this at MyDataset.__init__
+    parser.add_argument(
+        "--diffusion_mode", default=0, type=int
+    )  # 0 = standard LM, 1 = triplet diffusion
+    parser.add_argument("--diff_block_size", default=32, type=int)  # tokens per logical block
+    parser.add_argument(
+        "--diff_min_mask_ratio", default=0.0, type=float
+    )  # lower bound for per-sample r
+    parser.add_argument(
+        "--diff_max_mask_ratio", default=1.0, type=float
+    )  # upper bound for per-sample r
+    parser.add_argument(
+        "--diff_pad_id", default=65534, type=int
+    )  # pad token for tail. Dedicated dummy slot (penultimate; MASK uses last). MUST NOT be EOS (0) or MASK (vocab_size-1).
+    parser.add_argument(
+        "--diff_max_doc_tokens", default=0, type=int
+    )  # 0 => auto (= n_blocks * block_size); drop docs longer than this at MyDataset.__init__
     # Force-mask the doc-ending EOS (token 0) in every sample so the model gets
     # consistent supervision on "when to stop". Without this, EOS is masked
     # only ~50% of the time on average, making it a < 1/400 fraction of loss
@@ -94,27 +135,41 @@ if __name__ == "__main__":
     # distribution closer to inference (where every generation block starts
     # as all-MASK before denoising). 0 disables; 0.05-0.15 is typical.
     parser.add_argument("--diff_full_mask_prob", default=0.10, type=float)
-    parser.add_argument("--diff_conf_lambda", default=0.0, type=float)        # LLaDA-2.0 CAP: weight of the entropy-minimization aux loss on correctly-predicted masked positions; 0 disables.
+    parser.add_argument(
+        "--diff_conf_lambda", default=0.0, type=float
+    )  # LLaDA-2.0 CAP: weight of the entropy-minimization aux loss on correctly-predicted masked positions; 0 disables.
 
     parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()
 
     ########################################################################################################
 
-    import os, warnings, math, datetime, sys, time
+    import datetime
+    import math
+    import os
+    import sys
+    import time
+    import warnings
+
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
+
     if "deepspeed" in args.strategy:
         import deepspeed
     from pytorch_lightning import seed_everything
 
     if args.random_seed >= 0:
-        print(f"########## WARNING: GLOBAL SEED {args.random_seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n" * 3)
+        print(
+            f"########## WARNING: GLOBAL SEED {args.random_seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n"
+            * 3
+        )
         seed_everything(args.random_seed)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
-    warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
+    warnings.filterwarnings(
+        "ignore", ".*Consider increasing the value of the `num_workers` argument*"
+    )
     warnings.filterwarnings("ignore", ".*The progress bar already tracks a metric with the*")
     # os.environ["WDS_SHOW_SEED"] = "1"
 
@@ -135,7 +190,7 @@ if __name__ == "__main__":
     if args.dim_att <= 0:
         args.dim_att = args.n_embd
     if args.dim_ffn <= 0:
-        args.dim_ffn = int((args.n_embd * 3.5) // 32 * 32) # default = 3.5x emb size
+        args.dim_ffn = int((args.n_embd * 3.5) // 32 * 32)  # default = 3.5x emb size
 
     args.run_name = f"{args.vocab_size} ctx{args.ctx_len} L{args.n_layer} D{args.n_embd}"
     if not os.path.exists(args.proj_dir):
@@ -234,19 +289,25 @@ if __name__ == "__main__":
     assert args.data_type in ["binidx"]
 
     if args.lr_final == 0 or args.lr_init == 0:
-        rank_zero_info("\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n")
+        rank_zero_info(
+            "\n\nNote: lr_final = 0 or lr_init = 0. Using linear LR schedule instead.\n\n"
+        )
 
     assert args.precision in ["fp32", "tf32", "fp16", "bf16"]
     os.environ["RWKV_FLOAT_MODE"] = args.precision
     if args.precision == "fp32":
         for i in range(10):
-            rank_zero_info("\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n")
+            rank_zero_info(
+                "\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n"
+            )
     if args.precision == "fp16":
-        rank_zero_info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
+        rank_zero_info(
+            "\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n"
+        )
 
     os.environ["RWKV_JIT_ON"] = "1"
     if "deepspeed_stage_3" in args.strategy:
-        os.environ["RWKV_JIT_ON"] = "0" # somehow incompatible
+        os.environ["RWKV_JIT_ON"] = "0"  # somehow incompatible
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.enabled = True
@@ -266,8 +327,8 @@ if __name__ == "__main__":
 
     ########################################################################################################
 
-    from src.trainer import train_callback, generate_init_weight
     from src.dataset import MyDataset
+    from src.trainer import generate_init_weight, train_callback
 
     train_data = MyDataset(args)
     args.vocab_size = train_data.vocab_size
@@ -280,20 +341,24 @@ if __name__ == "__main__":
         # indexed by real data. We commandeer id (vocab_size - 1) = 65535 for MASK, so
         # vocab_size stays at the model's native 65536 and no ckpt resize is needed.
         args.diff_mask_id = args.vocab_size - 1
-        assert args.ctx_len >= 3 * args.diff_block_size, \
-            f"ctx_len ({args.ctx_len}) too small to fit one diffusion triplet (3 * block_size = {3 * args.diff_block_size})"
-        assert args.diff_pad_id != args.diff_mask_id, \
-            f"diff_pad_id ({args.diff_pad_id}) must differ from diff_mask_id ({args.diff_mask_id}); " \
+        assert (
+            args.ctx_len >= 3 * args.diff_block_size
+        ), f"ctx_len ({args.ctx_len}) too small to fit one diffusion triplet (3 * block_size = {3 * args.diff_block_size})"
+        assert args.diff_pad_id != args.diff_mask_id, (
+            f"diff_pad_id ({args.diff_pad_id}) must differ from diff_mask_id ({args.diff_mask_id}); "
             f"using MASK as tail pad would pollute its semantics."
+        )
         # If pad_id equals EOS (0), dataset.py's per-pad-position loss masking will
         # also kill the loss at *real* document-ending EOS tokens — the model then
         # never learns when to emit EOS. Use a dedicated dummy slot (e.g. 65534).
-        assert args.diff_pad_id != 0, \
-            f"diff_pad_id must NOT be 0 (EOS). Use a dummy vocab slot like 65534 " \
+        assert args.diff_pad_id != 0, (
+            f"diff_pad_id must NOT be 0 (EOS). Use a dummy vocab slot like 65534 "
             f"so dataset.py can mask pad from loss without also masking real EOS."
-        assert 0.0 <= args.diff_min_mask_ratio <= args.diff_max_mask_ratio <= 1.0, \
-            f"need 0 <= diff_min_mask_ratio ({args.diff_min_mask_ratio}) " \
+        )
+        assert 0.0 <= args.diff_min_mask_ratio <= args.diff_max_mask_ratio <= 1.0, (
+            f"need 0 <= diff_min_mask_ratio ({args.diff_min_mask_ratio}) "
             f"<= diff_max_mask_ratio ({args.diff_max_mask_ratio}) <= 1"
+        )
         n_blocks_per_sample = args.ctx_len // (3 * args.diff_block_size)
         rank_zero_info(
             f"########## Diffusion mode ON: block_size={args.diff_block_size}, "
@@ -304,6 +369,7 @@ if __name__ == "__main__":
         )
 
     from src.model import RWKV
+
     model = RWKV(args)
 
     if len(args.load_model) == 0 or args.train_stage == 1:  # shall we build the initial weights?
@@ -316,8 +382,8 @@ if __name__ == "__main__":
         load_dict = torch.load(args.load_model, map_location="cpu", weights_only=True, mmap=True)
         load_keys = list(load_dict.keys())
         for k in load_keys:
-            if k.startswith('_forward_module.'):
-                load_dict[k.replace('_forward_module.','')] = load_dict[k]
+            if k.startswith("_forward_module."):
+                load_dict[k.replace("_forward_module.", "")] = load_dict[k]
                 del load_dict[k]
     except:
         rank_zero_info(f"Bad checkpoint {args.load_model}")
@@ -329,7 +395,9 @@ if __name__ == "__main__":
                 args.load_model = f"{args.proj_dir}/rwkv-{max_p}.pth"
             args.epoch_begin = max_p + 1
             rank_zero_info(f"Trying {args.load_model}")
-            load_dict = torch.load(args.load_model, map_location="cpu", weights_only=True, mmap=True)
+            load_dict = torch.load(
+                args.load_model, map_location="cpu", weights_only=True, mmap=True
+            )
 
     if args.load_partial == 1:
         load_keys = load_dict.keys()
@@ -376,12 +444,24 @@ if __name__ == "__main__":
         # Belt-and-braces: explicitly turn off any fp16 master grads path.
         if "bf16" in trainer.strategy.config and isinstance(trainer.strategy.config["bf16"], dict):
             trainer.strategy.config["bf16"].setdefault("enabled", True)
-        trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
-        trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = args.ds_bucket_mb * 1000 * 1000
+        trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = (
+            args.ds_bucket_mb * 1000 * 1000
+        )
+        trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = (
+            args.ds_bucket_mb * 1000 * 1000
+        )
 
     # must set shuffle=False, persistent_workers=False (because worker is in another thread)
-    data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
+    data_loader = DataLoader(
+        train_data,
+        shuffle=False,
+        pin_memory=True,
+        batch_size=args.micro_bsz,
+        num_workers=1,
+        persistent_workers=False,
+        drop_last=True,
+    )
 
     if trainer.global_rank == 0:
-        print(f'### Preparing for training (loaded {args.load_model}). Please wait...')
+        print(f"### Preparing for training (loaded {args.load_model}). Please wait...")
     trainer.fit(model, data_loader, ckpt_path=getattr(args, "resume_ckpt_path", None))

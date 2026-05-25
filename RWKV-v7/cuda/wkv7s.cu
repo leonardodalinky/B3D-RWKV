@@ -53,7 +53,7 @@ __global__ void kernel_forward(const int B, const int T, const int C, const int 
     }
     #pragma unroll
     for (int j = 0; j < _N_; j++)
-        _state[j] = state[j];    
+        _state[j] = state[j];
 }
 
 void cuda_forward(int B, int T, int C, int H, float *state, bf16 *r, bf16* w, bf16 *k, bf16 *v, bf16 *a, bf16 *b, bf16 *y)

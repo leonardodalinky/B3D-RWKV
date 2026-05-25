@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-
 REPO_DIR = Path(__file__).resolve().parent.parent
 INFER_DIR = REPO_DIR / "infer"
 
@@ -161,8 +160,9 @@ def main():
         names = [s.strip() for s in selected.split(",") if s.strip()]
         for n in names:
             if n not in PRESETS:
-                print(f"ERROR: unknown preset {n!r}. Available: {', '.join(PRESETS)}",
-                      file=sys.stderr)
+                print(
+                    f"ERROR: unknown preset {n!r}. Available: {', '.join(PRESETS)}", file=sys.stderr
+                )
                 sys.exit(1)
     else:
         names = list(PRESETS)
@@ -197,8 +197,13 @@ def main():
         my_testing=MY_TESTING,
         grad_cp=0,
         weight_decay=0.0,
-        lr_init=0.0, lr_final=0.0, betas=(0.9, 0.99), adam_eps=1e-18,
-        layerwise_lr=0, my_pile_stage=0, train_stage=0,
+        lr_init=0.0,
+        lr_final=0.0,
+        betas=(0.9, 0.99),
+        adam_eps=1e-18,
+        layerwise_lr=0,
+        my_pile_stage=0,
+        train_stage=0,
         diffusion_mode=0,
         d_decay_lora=D_DECAY_LORA,
         d_aaa_lora=D_AAA_LORA,
@@ -232,11 +237,23 @@ def main():
             err: BaseException | None = None
             try:
                 text, finish_reason, n_completion = ds.run_one(
-                    model, tok, mask_id, VOCAB_SIZE,
-                    PROMPT, GEN_LEN, STEPS, BLOCK_SIZE,
-                    knobs["temperature"], knobs["top_k"], knobs["top_p"],
-                    knobs["decode_strategy"], knobs["conf_threshold"], knobs["min_per_step"],
-                    knobs["presence_penalty"], knobs["count_penalty"], knobs["penalty_decay"],
+                    model,
+                    tok,
+                    mask_id,
+                    VOCAB_SIZE,
+                    PROMPT,
+                    GEN_LEN,
+                    STEPS,
+                    BLOCK_SIZE,
+                    knobs["temperature"],
+                    knobs["top_k"],
+                    knobs["top_p"],
+                    knobs["decode_strategy"],
+                    knobs["conf_threshold"],
+                    knobs["min_per_step"],
+                    knobs["presence_penalty"],
+                    knobs["count_penalty"],
+                    knobs["penalty_decay"],
                     knobs["penalize_prompt"],
                     verbose=False,
                 )
@@ -249,8 +266,7 @@ def main():
             elapsed = time.time() - t0
 
             status = (
-                f"OK [{finish_reason}, {n_completion} tok]"
-                if ok else f"FAIL: {type(err).__name__}"
+                f"OK [{finish_reason}, {n_completion} tok]" if ok else f"FAIL: {type(err).__name__}"
             )
             print(f"    -> {status}  ({elapsed:.1f}s)")
 

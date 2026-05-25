@@ -28,15 +28,27 @@ from src.binidx import MMapIndexedDataset  # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", required=True, help="binidx prefix (no .bin/.idx)")
-    ap.add_argument("--target_lossable", type=float, default=2e9,
-                    help="target total lossable-supervised tokens to reach")
+    ap.add_argument(
+        "--target_lossable",
+        type=float,
+        default=2e9,
+        help="target total lossable-supervised tokens to reach",
+    )
     ap.add_argument("--ctx_len", type=int, default=6144)
     ap.add_argument("--block_size", type=int, default=32)
     ap.add_argument("--real_bsz", type=int, default=128)
-    ap.add_argument("--epoch_steps", type=int, default=315,
-                    help="40320 // real_bsz; train.py overrides --epoch_steps to this")
-    ap.add_argument("--avg_mask_ratio", type=float, default=0.55,
-                    help="0.5 from U[0,1] + 0.10 from full-mask trick → 0.55")
+    ap.add_argument(
+        "--epoch_steps",
+        type=int,
+        default=315,
+        help="40320 // real_bsz; train.py overrides --epoch_steps to this",
+    )
+    ap.add_argument(
+        "--avg_mask_ratio",
+        type=float,
+        default=0.55,
+        help="0.5 from U[0,1] + 0.10 from full-mask trick → 0.55",
+    )
     args = ap.parse_args()
 
     ds = MMapIndexedDataset(args.bin)
@@ -53,8 +65,7 @@ def main():
 
     # Try lossable.bin (two name conventions)
     bin_path = args.bin
-    cands = [bin_path + "_text_document.lossable.bin",
-             bin_path + ".lossable.bin"]
+    cands = [bin_path + "_text_document.lossable.bin", bin_path + ".lossable.bin"]
     lossable_path = next((p for p in cands if os.path.exists(p)), None)
 
     if lossable_path:
@@ -62,8 +73,10 @@ def main():
         n_loss_total = int(loss_buf.sum())
         n_tok_total = int(sizes.sum())
         L_global = n_loss_total / max(n_tok_total, 1)
-        print(f"lossable.bin: {n_loss_total:,}/{n_tok_total:,} tokens lossable "
-              f"({L_global * 100:.2f}%)")
+        print(
+            f"lossable.bin: {n_loss_total:,}/{n_tok_total:,} tokens lossable "
+            f"({L_global * 100:.2f}%)"
+        )
 
         # Per-doc lossable count → per-doc S
         S_per_doc = np.zeros(n_docs, dtype=np.float64)
@@ -73,7 +86,7 @@ def main():
         for i, di in enumerate(valid_idx):
             tok_pos = int(ptrs[di]) // dtype_size
             n = int(sizes[di])
-            S_per_doc[i] = loss_buf[tok_pos:tok_pos + n].sum()
+            S_per_doc[i] = loss_buf[tok_pos : tok_pos + n].sum()
         avg_doc_lossable = S_per_doc.mean()
         S = avg_doc_lossable * args.avg_mask_ratio
         print(f"avg lossable / doc      = {avg_doc_lossable:.1f}")
@@ -94,10 +107,11 @@ def main():
     print()
     print(f"target lossable supervisions: {target:.2e}")
     print(f"  samples needed            : {samples_needed:,.0f}")
-    print(f"  EXIT_TOKENS (real)        : {real_tokens:.3e}   "
-          f"({real_tokens / 1e9:.1f}B)")
-    print(f"  epochs                    : {epochs:.1f}  "
-          f"(epoch_steps={args.epoch_steps}, samples/epoch={samples_per_epoch:,})")
+    print(f"  EXIT_TOKENS (real)        : {real_tokens:.3e}   " f"({real_tokens / 1e9:.1f}B)")
+    print(
+        f"  epochs                    : {epochs:.1f}  "
+        f"(epoch_steps={args.epoch_steps}, samples/epoch={samples_per_epoch:,})"
+    )
 
 
 if __name__ == "__main__":

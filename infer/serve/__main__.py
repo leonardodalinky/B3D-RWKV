@@ -9,6 +9,7 @@ Critical: ``workers=1`` is non-negotiable. The semaphore + loaded model
 are per-process state; spawning multiple workers would each load their
 own GPU model (OOM) and break the "max-1-concurrent" guarantee.
 """
+
 from __future__ import annotations
 
 import os
