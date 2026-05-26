@@ -6,9 +6,9 @@
 
 <div align="center">
     <!-- <a href="TODO"><img src="https://img.shields.io/badge/Project Page-blue?style=for-the-badge&color=1a1a2e&logo=homepage&logoColor=orange" alt="Project Page"></a> -->
-    <a href="https://arxiv.org/abs/TODO"><img src="https://img.shields.io/badge/arXiv-<arxiv.id>-brightred?color=B31B1B&logo=arXiv&style=for-the-badge" alt="ArXiv"></a>
+    <a href="https://arxiv.org/abs/2605.25969"><img src="https://img.shields.io/badge/arXiv-2605.25969-brightred?color=B31B1B&logo=arXiv&style=for-the-badge" alt="ArXiv"></a>
     <!-- <br/> -->
-    <a href="https://huggingface.co/spaces/TODO"><img src="https://img.shields.io/badge/Huggingface-555555?logo=huggingface&style=for-the-badge" alt="Hugging Face"></a>
+    <a href="https://huggingface.co/leonardklin/B3D-RWKV"><img src="https://img.shields.io/badge/Huggingface-555555?logo=huggingface&style=for-the-badge" alt="Hugging Face"></a>
     <!-- <br/> -->
     <a href="https://pre-commit.com/"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&style=for-the-badge" alt="pre-commit">
     </a>
@@ -16,7 +16,7 @@
 
 ## 🔥 News
 
-- **[2026, May]**: TODO
+- **[2026, May 26]**: B3D-RWKV paper and model checkpoint are now publicly available! We hope this work contributes to the research community and inspires future advancements in language modeling. Stay tuned for our future works on RWKV and diffusion training.
 
 ## Training
 
